@@ -1,0 +1,417 @@
+plugins {
+    id 'fabric-loom' version '1.7-SNAPSHOT'
+    id 'maven-publish'
+}
+
+version = project.mod_version
+group = project.maven_group
+
+base {
+    archivesName = project.archives_base_name
+}
+
+repositories {
+    mavenCentral()
+    maven {
+        name = "Terraformers"
+        url = "https://maven.terraformersmc.com/"
+    }
+}
+
+// No splitEnvironmentSourceSets() - client-only mod, everything in src/main
+loom {
+    mods {
+        "animated_textures" {
+            sourceSet sourceSets.main
+        }
+    }
+}
+
+dependencies {
+    minecraft "com.mojang:minecraft:${project.minecraft_version}"
+    mappings "net.fabricmc:yarn:${project.yarn_mappings}:v2"
+    modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
+    modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
+    modImplementation "com.terraformersmc:modmenu:${project.modmenu_version}"
+}
+
+processResources {
+    inputs.property "version", project.version
+    filesMatching("fabric.mod.json") {
+        expand "version": project.version
+    }
+}
+
+tasks.withType(JavaCompile).configureEach {
+    it.options.release = 21
+}
+
+// Generate valid placeholder PNGs + animated GIF + animated APNG for the example pack.
+// All image generation uses Java standard libraries to ensure compatibility with
+// both stb_image (Minecraft's PNG loader) and our custom GifDecoder/ApngDecoder.
+task generateExamplePlaceholders {
+    doLast {
+        def blockDir = file('example_pack/assets/minecraft/textures/block')
+        def itemDir  = file('example_pack/assets/minecraft/textures/item')
+        blockDir.mkdirs()
+        itemDir.mkdirs()
+
+        // --- Shared helpers ---
+        def png = { File out, int r, int g, int b ->
+            def img = new java.awt.image.BufferedImage(16, 16, java.awt.image.BufferedImage.TYPE_INT_ARGB)
+            def gfx = img.createGraphics()
+            gfx.setColor(new java.awt.Color(r, g, b))
+            gfx.fillRect(0, 0, 16, 16)
+            gfx.setColor(new java.awt.Color(Math.max(0,r-50), Math.max(0,g-50), Math.max(0,b-50)))
+            gfx.fillRect(4, 4, 8, 8)
+            gfx.dispose()
+            javax.imageio.ImageIO.write(img, "PNG", out)
+        }
+
+        def frameImage = { int r, int g, int b, int frame, int total ->
+            def img = new java.awt.image.BufferedImage(16, 16, java.awt.image.BufferedImage.TYPE_INT_ARGB)
+            def gfx = img.createGraphics()
+            double brightness = 0.5 + 0.5 * Math.sin(frame * 2 * Math.PI / total)
+            int rr = (int)(r * brightness)
+            int gg = (int)(g * brightness)
+            int bb = (int)(b * brightness)
+            gfx.setColor(new java.awt.Color(
+                Math.min(255, Math.max(0, rr + 30)),
+                Math.min(255, Math.max(0, gg + 20)),
+                bb > 0 ? Math.min(255, bb) : 20))
+            gfx.fillRect(0, 0, 16, 16)
+            // checkerboard pattern
+            for (int y = 0; y < 16; y += 4) {
+                for (int x = 0; x < 16; x += 4) {
+                    if ((((int)(x/4)) + ((int)(y/4))) % 2 == 0) {
+                        gfx.setColor(new java.awt.Color(
+                            Math.min(255, Math.max(0, (int)((r-60)*brightness + 50))),
+                            Math.min(255, Math.max(0, (int)((g-60)*brightness + 30))),
+                            20))
+                        gfx.fillRect(x, y, 4, 4)
+                    }
+                }
+            }
+            gfx.dispose()
+            return img
+        }
+
+        // --- Placeholder PNGs ---
+        png(file('example_pack/assets/minecraft/textures/block/gold_ore.png'), 255, 180, 30)
+        png(file('example_pack/assets/minecraft/textures/item/diamond.png'),   80,  200, 240)
+
+        // --- Animated GIF (gold_ore) ---
+        int gifFrames = 8
+        def gifImages = (0..<gifFrames).collect { fi -> frameImage(220, 180, 0, fi, gifFrames) }
+        writeAnimatedGif(file('example_pack/assets/minecraft/textures/block/gold_ore.gif'), gifImages, 10)
+        println "Generated animated GIF: gold_ore.gif (${gifFrames} frames)"
+
+        // --- Animated APNG (diamond) ---
+        int apngFrames = 12
+        def apngImages = (0..<apngFrames).collect { fi ->
+            def img = new java.awt.image.BufferedImage(16, 16, java.awt.image.BufferedImage.TYPE_INT_ARGB)
+            def gfx = img.createGraphics()
+            double hue = (fi as double) / apngFrames
+            for (int y = 0; y < 16; y++) {
+                for (int x = 0; x < 16; x++) {
+                    double dist = Math.sqrt((x-7.5)*(x-7.5) + (y-7.5)*(y-7.5))
+                    double pxHue = (hue + dist / 12.0) % 1.0
+                    def c = java.awt.Color.getHSBColor((float)pxHue, 0.7f, (float)Math.max(0.15, 1.0 - dist/10.0))
+                    gfx.setColor(c)
+                    gfx.fillRect(x, y, 1, 1)
+                }
+            }
+            gfx.dispose()
+            return img
+        }
+        writeApng(file('example_pack/assets/minecraft/textures/item/diamond.png3'), apngImages, 1, 10)
+        println "Generated APNG: diamond.png3 (${apngFrames} frames)"
+
+        // --- Mob Effect animated textures (18x18 APNGs) ---
+        def effectDir = file('example_pack/assets/minecraft/textures/mob_effect')
+        effectDir.mkdirs()
+
+        // Generic helper: plain placeholder PNG for effects
+        def effectPng = { File out, int r, int g, int b ->
+            def img = new java.awt.image.BufferedImage(18, 18, java.awt.image.BufferedImage.TYPE_INT_ARGB)
+            def gfx = img.createGraphics()
+            gfx.setColor(new java.awt.Color(r, g, b))
+            gfx.fillRect(0, 0, 18, 18)
+            gfx.setColor(new java.awt.Color(Math.max(0,r-40), Math.max(0,g-40), Math.max(0,b-40)))
+            gfx.fillRect(3, 3, 12, 12)
+            gfx.dispose()
+            javax.imageio.ImageIO.write(img, "PNG", out)
+        }
+
+        // Speed effect: horizontal speed lines pulsing
+        int efFrames = 10
+        def speedImgs = (0..<efFrames).collect { fi ->
+            def img = new java.awt.image.BufferedImage(18, 18, java.awt.image.BufferedImage.TYPE_INT_ARGB)
+            def gfx = img.createGraphics()
+            double t = fi / (double)efFrames
+            gfx.setColor(new java.awt.Color(30, 30, 80))
+            gfx.fillRect(0, 0, 18, 18)
+            for (int line = 0; line < 4; line++) {
+                int offset = (int)((t * 18 + line * 5) % 18)
+                int alpha = (int)(160 + 95 * Math.sin(t * Math.PI * 2 + line))
+                gfx.setColor(new java.awt.Color(120, 200, 255, Math.max(0, Math.min(255, alpha))))
+                gfx.fillRect(offset, 2 + line * 4, 7, 2)
+            }
+            gfx.dispose()
+            return img
+        }
+        effectPng(file('example_pack/assets/minecraft/textures/mob_effect/speed.png'), 30, 30, 80)
+        writeApng(file('example_pack/assets/minecraft/textures/mob_effect/speed.png3'), speedImgs, 1, 10)
+
+        // Jump Boost effect: arrow bouncing up and down
+        def jumpImgs = (0..<efFrames).collect { fi ->
+            def img = new java.awt.image.BufferedImage(18, 18, java.awt.image.BufferedImage.TYPE_INT_ARGB)
+            def gfx = img.createGraphics()
+            double t = fi / (double)efFrames
+            gfx.setColor(new java.awt.Color(20, 50, 20))
+            gfx.fillRect(0, 0, 18, 18)
+            int arrowY = (int)(10 - 8 * Math.abs(Math.sin(t * Math.PI * 2)))
+            gfx.setColor(new java.awt.Color(80, 255, 80))
+            // Arrow shape
+            gfx.fillRect(8, arrowY, 2, 8)
+            gfx.fillRect(5, arrowY + 2, 8, 2)
+            for (int i = 0; i < 3; i++) {
+                gfx.fillRect(6 - i, arrowY + 1 + i, 1, 1)
+                gfx.fillRect(11 + i, arrowY + 1 + i, 1, 1)
+            }
+            gfx.dispose()
+            return img
+        }
+        effectPng(file('example_pack/assets/minecraft/textures/mob_effect/jump_boost.png'), 20, 60, 20)
+        writeApng(file('example_pack/assets/minecraft/textures/mob_effect/jump_boost.png3'), jumpImgs, 1, 10)
+
+        // Strength effect: radiating fist/power
+        def strengthImgs = (0..<efFrames).collect { fi ->
+            def img = new java.awt.image.BufferedImage(18, 18, java.awt.image.BufferedImage.TYPE_INT_ARGB)
+            def gfx = img.createGraphics()
+            double t = fi / (double)efFrames
+            gfx.setColor(new java.awt.Color(60, 30, 10))
+            gfx.fillRect(0, 0, 18, 18)
+            // Pulsing radial rings
+            for (int ring = 0; ring < 3; ring++) {
+                double phase = t + ring / 3.0
+                int radius = (int)(3 + 4 * (phase % 1.0))
+                int alpha = (int)(200 * (1.0 - (phase % 1.0)))
+                gfx.setColor(new java.awt.Color(255, 150, 50, Math.max(0, Math.min(255, alpha))))
+                int r2 = radius + 1
+                for (int y = 1; y < 17; y++) {
+                    for (int x = 1; x < 17; x++) {
+                        double dist = Math.sqrt((x-9)*(x-9) + (y-9)*(y-9))
+                        if (dist >= radius && dist < r2) {
+                            gfx.fillRect(x, y, 1, 1)
+                        }
+                    }
+                }
+            }
+            // Central fist/icon area
+            gfx.setColor(new java.awt.Color(255, 180, 80))
+            gfx.fillRect(7, 6, 4, 6)
+            gfx.fillRect(6, 7, 6, 4)
+            gfx.dispose()
+            return img
+        }
+        effectPng(file('example_pack/assets/minecraft/textures/mob_effect/strength.png'), 60, 30, 10)
+        writeApng(file('example_pack/assets/minecraft/textures/mob_effect/strength.png3'), strengthImgs, 1, 10)
+
+        // Fire Resistance effect: flame/fire animation
+        def fireImgs = (0..<efFrames).collect { fi ->
+            def img = new java.awt.image.BufferedImage(18, 18, java.awt.image.BufferedImage.TYPE_INT_ARGB)
+            def gfx = img.createGraphics()
+            double t = fi / (double)efFrames
+            gfx.setColor(new java.awt.Color(50, 15, 5))
+            gfx.fillRect(0, 0, 18, 18)
+            // Flame shapes using sine waves
+            for (int flame = 0; flame < 3; flame++) {
+                double phase = t * Math.PI * 2 + flame * 2.0
+                int baseX = 4 + flame * 5
+                for (int y = 2; y < 17; y++) {
+                    double flicker = Math.sin(phase + y * 0.5) * 3 + Math.sin(phase * 1.7 + y * 0.3) * 2
+                    int flameW = (int)(1 + (16 - y) / 7.0 + Math.abs(flicker) * 0.5)
+                    int cx = baseX + (int)(flicker * 0.3)
+                    for (int dx = -flameW; dx <= flameW; dx++) {
+                        int px = cx + dx
+                        if (px >= 0 && px < 18 && y >= 0 && y < 18) {
+                            // Color gradient: white/yellow at base, orange in middle, red at top
+                            double heightRatio = y / 17.0
+                            int r, g, bl
+                            if (heightRatio < 0.4) {
+                                r = 255; g = 220 + (int)(35 * heightRatio / 0.4); bl = 100
+                            } else if (heightRatio < 0.7) {
+                                r = 255; g = (int)(180 - 80 * (heightRatio - 0.4) / 0.3); bl = 15
+                            } else {
+                                r = (int)(220 - 90 * (heightRatio - 0.7) / 0.3); g = 30; bl = 5
+                            }
+                            int distAlpha = (int)(220 * (1.0 - Math.abs(dx) / (double)(flameW + 1)))
+                            gfx.setColor(new java.awt.Color(
+                                Math.min(255, r), Math.min(255, Math.max(0, g)),
+                                Math.min(255, Math.max(0, bl)),
+                                Math.max(0, Math.min(255, distAlpha))))
+                            gfx.fillRect(px, y, 1, 1)
+                        }
+                    }
+                }
+            }
+            gfx.dispose()
+            return img
+        }
+        effectPng(file('example_pack/assets/minecraft/textures/mob_effect/fire_resistance.png'), 50, 15, 5)
+        writeApng(file('example_pack/assets/minecraft/textures/mob_effect/fire_resistance.png3'), fireImgs, 1, 10)
+        println "Generated 4 animated effect textures (speed, jump_boost, strength, fire_resistance)"
+    }
+}
+
+// ---- Animated GIF writer (pure Java, no external deps) ----
+void writeAnimatedGif(File outFile, java.util.List<java.awt.image.BufferedImage> frames, int delayCs) {
+    def writer = javax.imageio.ImageIO.getImageWritersByFormatName('gif').next()
+    def params = writer.defaultWriteParam
+    def stream = new javax.imageio.stream.FileImageOutputStream(outFile)
+
+    writer.output = stream
+    writer.prepareWriteSequence(null)
+
+    for (int i = 0; i < frames.size(); i++) {
+        def img = frames[i]
+        // Build GIF frame metadata
+        def node = new javax.imageio.metadata.IIOMetadataNode('javax_imageio_gif_image_1.0')
+        def gce = new javax.imageio.metadata.IIOMetadataNode('GraphicControlExtension')
+        gce.setAttribute('disposalMethod', 'restoreToBackgroundColor')
+        gce.setAttribute('userInputFlag', 'FALSE')
+        gce.setAttribute('transparentColorFlag', 'FALSE')
+        gce.setAttribute('delayTime', String.valueOf(delayCs))
+        gce.setAttribute('transparentColorIndex', '0')
+        node.appendChild(gce)
+
+        // Application Extension for looping
+        def ae = new javax.imageio.metadata.IIOMetadataNode('ApplicationExtensions')
+        def aeChild = new javax.imageio.metadata.IIOMetadataNode('ApplicationExtension')
+        aeChild.setAttribute('applicationID', 'NETSCAPE')
+        aeChild.setAttribute('authenticationCode', '2.0')
+        aeChild.setUserObject([0x01, 0x00, 0x00] as byte[])
+        ae.appendChild(aeChild)
+        node.appendChild(ae)
+
+        def meta = writer.getDefaultImageMetadata(
+            new javax.imageio.ImageTypeSpecifier(img), params)
+        meta.mergeTree('javax_imageio_gif_image_1.0', node)
+
+        writer.writeToSequence(
+            new javax.imageio.IIOImage(img, null, meta), params)
+    }
+
+    writer.endWriteSequence()
+    stream.close()
+    writer.dispose()
+}
+
+// ---- APNG writer (pure Java) ----
+void writeApng(File outFile, java.util.List<java.awt.image.BufferedImage> frames, int delayNum, int delayDen) {
+    def bytes = new java.io.ByteArrayOutputStream()
+
+    // Helper to build a chunk
+    def chunk = { byte[] type, byte[] data ->
+        def bos = new java.io.ByteArrayOutputStream()
+        bos.write([(data.length >> 24) & 0xFF, (data.length >> 16) & 0xFF, (data.length >> 8) & 0xFF, data.length & 0xFF] as byte[])
+        bos.write(type)
+        bos.write(data)
+        def crc = new java.util.zip.CRC32()
+        crc.update(type)
+        crc.update(data)
+        def cv = (int)crc.value
+        bos.write([(cv >> 24) & 0xFF, (cv >> 16) & 0xFF, (cv >> 8) & 0xFF, cv & 0xFF] as byte[])
+        bos.toByteArray()
+    }
+
+    // PNG signature
+    bytes.write([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A] as byte[])
+
+    // IHDR
+    def img0 = frames[0]
+    int w = img0.width, h = img0.height
+    def ihdr = new java.io.ByteArrayOutputStream()
+    ihdr.write([(w >> 24) & 0xFF, (w >> 16) & 0xFF, (w >> 8) & 0xFF, w & 0xFF] as byte[])
+    ihdr.write([(h >> 24) & 0xFF, (h >> 16) & 0xFF, (h >> 8) & 0xFF, h & 0xFF] as byte[])
+    ihdr.write([8, 6, 0, 0, 0] as byte[]) // bitDepth=8, colorType=6(RGBA), comp/filter/interlace=0
+    bytes.write(chunk('IHDR'.bytes, ihdr.toByteArray()))
+
+    // acTL
+    def actl = new java.io.ByteArrayOutputStream()
+    actl.write([(frames.size() >> 24) & 0xFF, (frames.size() >> 16) & 0xFF, (frames.size() >> 8) & 0xFF, frames.size() & 0xFF] as byte[])
+    actl.write([0, 0, 0, 0] as byte[]) // num_plays=0 (infinite)
+    bytes.write(chunk('acTL'.bytes, actl.toByteArray()))
+
+    frames.eachWithIndex { img, fi ->
+        // fcTL
+        def fctl = new java.io.ByteArrayOutputStream()
+        fctl.write([(fi >> 24) & 0xFF, (fi >> 16) & 0xFF, (fi >> 8) & 0xFF, fi & 0xFF] as byte[]) // seq
+        fctl.write([(w >> 24) & 0xFF, (w >> 16) & 0xFF, (w >> 8) & 0xFF, w & 0xFF] as byte[])
+        fctl.write([(h >> 24) & 0xFF, (h >> 16) & 0xFF, (h >> 8) & 0xFF, h & 0xFF] as byte[])
+        fctl.write([0, 0, 0, 0] as byte[]) // x/y offset = 0
+        fctl.write([(delayNum >> 8) & 0xFF, delayNum & 0xFF] as byte[])
+        fctl.write([(delayDen >> 8) & 0xFF, delayDen & 0xFF] as byte[])
+        fctl.write([0, 0] as byte[]) // dispose=0, blend=0
+        bytes.write(chunk('fcTL'.bytes, fctl.toByteArray()))
+
+        // Build raw image data
+        def raw = new java.io.ByteArrayOutputStream()
+        for (int y = 0; y < h; y++) {
+            raw.write(0) // filter: none
+            for (int x = 0; x < w; x++) {
+                int argb = img.getRGB(x, y)
+                raw.write([(argb >> 16) & 0xFF, (argb >> 8) & 0xFF, argb & 0xFF, (argb >> 24) & 0xFF] as byte[])
+            }
+        }
+        // Compress
+        def compressed = new java.io.ByteArrayOutputStream()
+        def deflater = new java.util.zip.Deflater()
+        deflater.setInput(raw.toByteArray())
+        deflater.finish()
+        byte[] buf = new byte[4096]
+        while (!deflater.finished()) {
+            int n = deflater.deflate(buf)
+            if (n > 0) compressed.write(buf, 0, n)
+        }
+        deflater.end()
+
+        if (fi == 0) {
+            bytes.write(chunk('IDAT'.bytes, compressed.toByteArray()))
+        } else {
+            def fdat = new java.io.ByteArrayOutputStream()
+            fdat.write([(fi >> 24) & 0xFF, (fi >> 16) & 0xFF, (fi >> 8) & 0xFF, fi & 0xFF] as byte[]) // seq
+            fdat.write(compressed.toByteArray())
+            bytes.write(chunk('fdAT'.bytes, fdat.toByteArray()))
+        }
+    }
+
+    // IEND
+    bytes.write(chunk('IEND'.bytes, new byte[0]))
+
+    outFile.bytes = bytes.toByteArray()
+}
+
+processResources.dependsOn generateExamplePlaceholders
+
+java {
+    withSourcesJar()
+    sourceCompatibility = JavaVersion.VERSION_21
+    targetCompatibility = JavaVersion.VERSION_21
+}
+
+jar {
+    from("LICENSE") {
+        rename { "${it}_${project.base.archivesName.get()}" }
+    }
+}
+
+publishing {
+    publications {
+        create("mavenJava", MavenPublication) {
+            artifactId = project.archives_base_name
+            from components.java
+        }
+    }
+}

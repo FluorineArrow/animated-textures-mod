@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 1,
+  "id": "animated_textures",
+  "version": "${version}",
+  "name": "Animated Textures (APNG & GIF)",
+  "description": "Adds APNG (.png3) and GIF animation support to Minecraft resource packs. Place .png3 (APNG) or .gif files in your resource pack textures folder.",
+  "authors": [
+    "AnimatedTexturesMod"
+  ],
+  "contact": {
+    "sources": "https://github.com/example/animated-textures-mod"
+  },
+  "license": "MIT",
+  "icon": "assets/animated_textures/icon.png",
+  "environment": "client",
+  "entrypoints": {
+    "client": [
+      "com.animatedtextures.client.AnimatedTexturesClient"
+    ],
+    "modmenu": [
+      "com.animatedtextures.client.AnimatedTexturesModMenu"
+    ]
+  },
+  "custom": {
+    "modmenu": {
+      "badges": ["client"]
+    }
+  },
+  "mixins": [
+    "animated_textures.mixins.json"
+  ],
+  "depends": {
+    "fabricloader": ">=0.15.11",
+    "fabric-api": "*",
+    "minecraft": "~1.21",
+    "java": ">=21"
+  }
+}

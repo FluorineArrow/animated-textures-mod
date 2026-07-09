@@ -1,0 +1,13 @@
+{
+  "required": true,
+  "package": "com.animatedtextures.mixin",
+  "compatibilityLevel": "JAVA_21",
+  "client": [
+    "SpriteContentsAnimationMixin",
+    "SpriteAtlasTextureMixin",
+    "TextureManagerMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}
