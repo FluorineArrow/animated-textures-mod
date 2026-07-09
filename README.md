@@ -11,10 +11,10 @@
 
 > **🤖 AI 辅助开发声明 / AI-Assisted Development Disclosure**
 >
-> 本项目的代码实现、架构设计及文档均由 **Claude (Anthropic)** 辅助生成。
+> 本项目的代码实现、架构设计及文档均通过 **Claude Code** 与 **MiMo** 模型辅助完成。
 > 核心创意、需求定义和功能决策由人类开发者完成，AI 负责代码编写、调试优化和技术文档撰写。
 >
-> The codebase, architecture, and documentation of this project were generated with the assistance of **Claude (Anthropic)**.
+> The codebase, architecture, and documentation of this project were developed with the assistance of **Claude Code** and the **MiMo** model.
 > Core ideas, requirements, and feature decisions were made by the human developer; AI handled code writing, debugging, optimization, and technical documentation.
 
 ---
