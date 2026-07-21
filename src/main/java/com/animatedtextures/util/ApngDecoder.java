@@ -1,319 +1,476 @@
 package com.animatedtextures.util;
 
 import javax.imageio.ImageIO;
-import java.awt.*;
+import java.awt.AlphaComposite;
+import java.awt.Graphics2D;
 import java.awt.image.BufferedImage;
-import java.io.*;
-import java.nio.ByteBuffer;
-import java.nio.ByteOrder;
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.zip.CRC32;
 
 /**
- * APNG (Animated PNG) decoder.
- *
- * APNG is a PNG extension that stores animation frames in fcTL/fdAT chunks.
- * Regular PNG readers ignore these chunks, so we parse them manually here.
- *
- * Spec: https://wiki.mozilla.org/APNG_Spec
+ * Strict APNG decoder for .png3 resource-pack assets.
  */
 public class ApngDecoder {
 
-    /** Maximum APNG file size (100 MB) to prevent OOM from malicious resource packs. */
-    private static final int MAX_FILE_SIZE = 100 * 1024 * 1024;
-
-    // PNG chunk type constants
-    private static final int CHUNK_IHDR = chunkType("IHDR");
-    private static final int CHUNK_IDAT = chunkType("IDAT");
-    private static final int CHUNK_IEND = chunkType("IEND");
-    private static final int CHUNK_acTL = chunkType("acTL");
-    private static final int CHUNK_fcTL = chunkType("fcTL");
-    private static final int CHUNK_fdAT = chunkType("fdAT");
-
-    private static int chunkType(String s) {
-        byte[] b = s.getBytes();
-        return ((b[0] & 0xFF) << 24) | ((b[1] & 0xFF) << 16) | ((b[2] & 0xFF) << 8) | (b[3] & 0xFF);
-    }
-
-    // PNG magic bytes
     private static final byte[] PNG_SIGNATURE = {
             (byte) 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A
     };
 
-    // ---- Per-frame metadata (fcTL) ----
-    private static class FrameControl {
-        int sequenceNumber;
-        int width, height;
-        int xOffset, yOffset;
-        int delayNum, delayDen; // delay = delayNum / delayDen seconds
-        int disposeOp;   // 0=NONE, 1=BACKGROUND, 2=PREVIOUS
-        int blendOp;     // 0=SOURCE, 1=OVER
+    private static final String IHDR = "IHDR";
+    private static final String IDAT = "IDAT";
+    private static final String IEND = "IEND";
+    private static final String ACTL = "acTL";
+    private static final String FCTL = "fcTL";
+    private static final String FDAT = "fdAT";
+
+    private final AnimatedImageLimits limits;
+
+    ApngDecoder(AnimatedImageLimits limits) {
+        this.limits = limits;
     }
 
-    public List<AnimatedFrame> decode(InputStream stream) throws Exception {
-        byte[] data = stream.readAllBytes();
-        if (data.length > MAX_FILE_SIZE) {
-            throw new Exception("APNG file too large: " + data.length + " bytes (max " + MAX_FILE_SIZE + ")");
-        }
-        return parseApng(data);
+    public ApngDecoder(AnimatedTextureReloadBudget.Remaining remaining) {
+        this(AnimatedImageLimits.DEFAULT.forRemaining(remaining));
     }
 
-    private List<AnimatedFrame> parseApng(byte[] data) throws Exception {
-        // Verify PNG signature
-        for (int i = 0; i < PNG_SIGNATURE.length; i++) {
-            if (data[i] != PNG_SIGNATURE[i]) throw new Exception("Not a PNG file");
-        }
-
-        int pos = 8; // after signature
-        byte[] ihdrData = null;
-        byte[] defaultImageData = null; // for first-frame-as-default-image
-        List<FrameControl> frameControls = new ArrayList<>();
-        List<List<byte[]>> frameDatChunks = new ArrayList<>(); // raw IDAT/fdAT per frame
-        List<byte[]> currentFrameDatChunks = null;
-
-        int frameIndex = -1;
-        boolean hasActl = false;
-        int totalFrames = 0;
-        List<byte[]> idatChunks = new ArrayList<>(); // default image IDAT
-
-        // Keep original palette/transparency/gamma chunks for re-assembling PNGs
-        List<byte[][]> ancillaryChunks = new ArrayList<>(); // [type, data]
-
-        while (pos < data.length - 4) {
-            int length = readInt(data, pos); pos += 4;
-            int type = readInt(data, pos); pos += 4;
-            byte[] chunkData = new byte[length];
-            System.arraycopy(data, pos, chunkData, 0, length);
-            pos += length;
-            int crc = readInt(data, pos); pos += 4;
-
-            if (type == CHUNK_IHDR) {
-                ihdrData = chunkData;
-
-            } else if (type == CHUNK_acTL) {
-                hasActl = true;
-                totalFrames = readInt(chunkData, 0);
-
-            } else if (type == CHUNK_fcTL) {
-                // fcTL chunk must be exactly 26 bytes per APNG spec
-                if (length < 26) {
-                    System.err.println("[AnimatedTextures] APNG: fcTL chunk too short (" + length + " bytes, need 26), skipping frame.");
-                    // pos already advanced past chunk data; just skip this frame
-                } else {
-                    FrameControl fc = new FrameControl();
-                    fc.sequenceNumber = readInt(chunkData, 0);
-                    fc.width = readInt(chunkData, 4);
-                    fc.height = readInt(chunkData, 8);
-                    fc.xOffset = readInt(chunkData, 12);
-                    fc.yOffset = readInt(chunkData, 16);
-                    fc.delayNum = readShort(chunkData, 20);
-                    fc.delayDen = readShort(chunkData, 22);
-                    fc.disposeOp = chunkData[24] & 0xFF;
-                    fc.blendOp = chunkData[25] & 0xFF;
-                    frameControls.add(fc);
-                    currentFrameDatChunks = new ArrayList<>();
-                    frameDatChunks.add(currentFrameDatChunks);
-                    frameIndex++;
-                }
-
-            } else if (type == CHUNK_IDAT) {
-                idatChunks.add(chunkData);
-                // If no fcTL seen yet, these are for the default image
-                if (currentFrameDatChunks != null) {
-                    currentFrameDatChunks.add(chunkData);
-                }
-
-            } else if (type == CHUNK_fdAT) {
-                // fdAT: 4 bytes sequence number, rest is compressed image data
-                byte[] imgData = new byte[length - 4];
-                System.arraycopy(chunkData, 4, imgData, 0, imgData.length);
-                if (currentFrameDatChunks != null) {
-                    currentFrameDatChunks.add(imgData);
-                }
-
-            } else if (type == CHUNK_IEND) {
-                break;
-
-            } else {
-                // Ancillary chunk (PLTE, tRNS, gAMA, etc.) - preserve for sub-image reconstruction
-                byte[] typeBytes = new byte[4];
-                typeBytes[0] = (byte) ((type >> 24) & 0xFF);
-                typeBytes[1] = (byte) ((type >> 16) & 0xFF);
-                typeBytes[2] = (byte) ((type >> 8) & 0xFF);
-                typeBytes[3] = (byte) (type & 0xFF);
-                ancillaryChunks.add(new byte[][]{typeBytes, chunkData});
-            }
-        }
-
-        if (!hasActl || frameControls.isEmpty()) {
-            // Not animated - treat as single static frame
-            BufferedImage img = ImageIO.read(new ByteArrayInputStream(
-                    java.util.Arrays.copyOf(data, data.length)));
-            if (img == null) throw new Exception("Failed to decode PNG");
-            return List.of(new AnimatedFrame(img, 100));
-        }
-
-        // Reconstruct each frame as a standalone PNG and decode it
-        int canvasWidth = readInt(ihdrData, 0);
-        int canvasHeight = readInt(ihdrData, 4);
-        int bitDepth = ihdrData[8] & 0xFF;
-        int colorType = ihdrData[9] & 0xFF;
-        int compressionMethod = ihdrData[10] & 0xFF;
-        int filterMethod = ihdrData[11] & 0xFF;
-        int interlaceMethod = ihdrData[12] & 0xFF;
-
-        List<AnimatedFrame> result = new ArrayList<>();
-
-        BufferedImage canvas = new BufferedImage(canvasWidth, canvasHeight, BufferedImage.TYPE_INT_ARGB);
-
-        for (int fi = 0; fi < frameControls.size(); fi++) {
-            FrameControl fc = frameControls.get(fi);
-
-            // Safety check: frameDatChunks may have fewer entries if the APNG is malformed
-            if (fi >= frameDatChunks.size()) {
-                System.err.println("[AnimatedTextures] APNG: fcTL/fdAT count mismatch at frame " + fi + ", truncating.");
-                break;
-            }
-            List<byte[]> datChunks = frameDatChunks.get(fi);
-            if (datChunks == null || datChunks.isEmpty()) {
-                System.err.println("[AnimatedTextures] APNG: frame " + fi + " has no image data, skipping.");
-                continue;
-            }
-
-            // Reconstruct a valid PNG for this frame's sub-image
-            byte[] framePng = buildPng(fc.width, fc.height, bitDepth, colorType,
-                    compressionMethod, filterMethod, interlaceMethod,
-                    ancillaryChunks, datChunks);
-
-            BufferedImage frameImg = ImageIO.read(new ByteArrayInputStream(framePng));
-            if (frameImg == null) continue;
-
-            // Save canvas state BEFORE drawing, for DISPOSE_OP_PREVIOUS.
-            // Must be saved every frame (not just when disposeOp==2) because
-            // consecutive DISPOSE_OP_PREVIOUS frames each need their own pre-draw snapshot.
-            BufferedImage canvasBeforeDraw = (fc.disposeOp == 2) ? copyImage(canvas) : null;
-
-            // Blend frame onto canvas
-            Graphics2D g = canvas.createGraphics();
-            if (fc.blendOp == 0) {
-                // SOURCE: overwrite with frame pixels (including alpha)
-                g.setComposite(AlphaComposite.getInstance(AlphaComposite.SRC));
-            } else {
-                // OVER: normal alpha compositing
-                g.setComposite(AlphaComposite.getInstance(AlphaComposite.SRC_OVER));
-            }
-            g.drawImage(frameImg, fc.xOffset, fc.yOffset, null);
-            g.dispose();
-
-            // Capture canvas state as this frame
-            int durationMs = computeDurationMs(fc);
-            result.add(new AnimatedFrame(copyImage(canvas), durationMs));
-
-            // Apply dispose operation
-            if (fc.disposeOp == 1) {
-                // DISPOSE_OP_BACKGROUND: clear frame region to transparent
-                Graphics2D gc = canvas.createGraphics();
-                gc.setComposite(AlphaComposite.getInstance(AlphaComposite.CLEAR));
-                gc.fillRect(fc.xOffset, fc.yOffset, fc.width, fc.height);
-                gc.dispose();
-            } else if (fc.disposeOp == 2 && canvasBeforeDraw != null) {
-                // DISPOSE_OP_PREVIOUS: restore canvas to state before this frame was drawn
-                canvas = canvasBeforeDraw;
-            }
-            // DISPOSE_OP_NONE (0): keep canvas as-is
-        }
-
-        return result.isEmpty() ? List.of(new AnimatedFrame(canvas, 100)) : result;
-    }
-
-    private int computeDurationMs(FrameControl fc) {
-        if (fc.delayDen == 0) return fc.delayNum * 10; // assume /100 if den is 0
-        return (int) ((fc.delayNum * 1000L) / fc.delayDen);
-    }
-
-    private BufferedImage copyImage(BufferedImage src) {
-        BufferedImage copy = new BufferedImage(src.getWidth(), src.getHeight(), BufferedImage.TYPE_INT_ARGB);
-        Graphics2D g = copy.createGraphics();
-        g.drawImage(src, 0, 0, null);
-        g.dispose();
-        return copy;
+    public ApngDecoder() {
+        this(AnimatedImageLimits.DEFAULT);
     }
 
     /**
-     * Assemble a valid PNG byte stream from raw chunks.
+     * Decodes frames only. Use {@link #decodeAnimation(InputStream)} to preserve playback metadata.
      */
-    private byte[] buildPng(int w, int h, int bitDepth, int colorType,
-                             int compressionMethod, int filterMethod, int interlaceMethod,
-                             List<byte[][]> ancillary, List<byte[]> idatChunks) throws Exception {
-        ByteArrayOutputStream out = new ByteArrayOutputStream();
-
-        // Signature
-        out.write(PNG_SIGNATURE);
-
-        // IHDR
-        byte[] ihdr = new byte[13];
-        writeInt(ihdr, 0, w);
-        writeInt(ihdr, 4, h);
-        ihdr[8] = (byte) bitDepth;
-        ihdr[9] = (byte) colorType;
-        ihdr[10] = (byte) compressionMethod;
-        ihdr[11] = (byte) filterMethod;
-        ihdr[12] = (byte) interlaceMethod;
-        writeChunk(out, "IHDR", ihdr);
-
-        // Ancillary chunks (PLTE, tRNS, etc.)
-        for (byte[][] chunk : ancillary) {
-            writeChunk(out, new String(chunk[0]), chunk[1]);
-        }
-
-        // IDAT chunks (combine all into one)
-        ByteArrayOutputStream combined = new ByteArrayOutputStream();
-        for (byte[] dat : idatChunks) combined.write(dat);
-        writeChunk(out, "IDAT", combined.toByteArray());
-
-        // IEND
-        writeChunk(out, "IEND", new byte[0]);
-
-        return out.toByteArray();
+    @Deprecated
+    public List<AnimatedFrame> decode(InputStream stream) throws Exception {
+        return decodeAnimation(stream).frames();
     }
 
-    private void writeChunk(OutputStream out, String type, byte[] data) throws Exception {
-        byte[] typeBytes = type.getBytes();
-        // Length
-        byte[] len = new byte[4];
-        writeInt(len, 0, data.length);
-        out.write(len);
-        // Type
-        out.write(typeBytes);
-        // Data
-        out.write(data);
-        // CRC (over type + data)
+    public DecodedAnimation decodeAnimation(InputStream stream) throws Exception {
+        return parse(limits.readBounded(stream, "APNG"));
+    }
+
+    private DecodedAnimation parse(byte[] bytes) throws Exception {
+        if (bytes.length < PNG_SIGNATURE.length || !Arrays.equals(PNG_SIGNATURE, Arrays.copyOf(bytes, PNG_SIGNATURE.length))) {
+            throw new IOException("Not a PNG file");
+        }
+
+        int offset = PNG_SIGNATURE.length;
+        boolean seenIhdr = false;
+        boolean seenActl = false;
+        boolean seenIdat = false;
+        boolean seenIend = false;
+        int expectedSequence = 0;
+        int declaredFrames = -1;
+        long totalPlays = DecodedAnimation.INFINITE_PLAYS;
+        int canvasWidth = 0;
+        int canvasHeight = 0;
+        int bitDepth = -1;
+        int colorType = -1;
+        boolean seenPlte = false;
+        boolean seenTrns = false;
+        int paletteEntries = 0;
+        byte[] ihdr = null;
+        List<PngChunk> ancillary = new ArrayList<>();
+        int ancillaryBytes = 0;
+        List<FrameData> frames = new ArrayList<>();
+        FrameData currentFrame = null;
+
+        while (offset < bytes.length) {
+            if (bytes.length - offset < 12) {
+                throw new IOException("Truncated PNG chunk envelope");
+            }
+            long declaredLength = readUnsignedInt(bytes, offset);
+            offset += 4;
+            String type = readType(bytes, offset);
+            offset += 4;
+            if (declaredLength > Integer.MAX_VALUE || declaredLength > bytes.length - offset - 4L) {
+                throw new IOException("PNG chunk length is invalid for " + type);
+            }
+            int length = (int) declaredLength;
+            byte[] data = Arrays.copyOfRange(bytes, offset, offset + length);
+            offset += length;
+            long expectedCrc = readUnsignedInt(bytes, offset);
+            offset += 4;
+            verifyCrc(type, data, expectedCrc);
+
+            if (!seenIhdr && !IHDR.equals(type)) {
+                throw new IOException("PNG IHDR must be the first chunk");
+            }
+            if (seenIend) {
+                throw new IOException("PNG data appears after IEND");
+            }
+
+            switch (type) {
+                case IHDR -> {
+                    if (seenIhdr || length != 13) {
+                        throw new IOException("PNG must contain one 13-byte IHDR");
+                    }
+                    canvasWidth = readPositiveInt(data, 0, "APNG canvas width");
+                    canvasHeight = readPositiveInt(data, 4, "APNG canvas height");
+                    limits.checkedPixels(canvasWidth, canvasHeight, "APNG canvas");
+                    validateIhdr(data);
+                    bitDepth = data[8] & 0xFF;
+                    colorType = data[9] & 0xFF;
+                    ihdr = data;
+                    seenIhdr = true;
+                }
+                case ACTL -> {
+                    if (!seenIhdr || seenActl || seenIdat || length != 8) {
+                        throw new IOException("APNG acTL must appear once before IDAT and contain eight bytes");
+                    }
+                    declaredFrames = readPositiveInt(data, 0, "APNG frame count");
+                    long declaredPlays = readUnsignedInt(data, 4);
+                    totalPlays = declaredPlays == 0 ? DecodedAnimation.INFINITE_PLAYS : declaredPlays;
+                    if (declaredFrames > limits.maxFrames) {
+                        throw new IOException("APNG exceeds the frame limit of " + limits.maxFrames);
+                    }
+                    long declaredPixels = (long) declaredFrames * limits.checkedPixels(
+                            canvasWidth, canvasHeight, "APNG declared output canvas");
+                    if (declaredPixels > limits.maxTotalPixels) {
+                        throw new IOException("APNG declared output exceeds the retained pixel limit of "
+                                + limits.maxTotalPixels);
+                    }
+                    seenActl = true;
+                }
+                case FCTL -> {
+                    if (!seenActl || length != 26) {
+                        throw new IOException("APNG fcTL requires acTL and exactly 26 bytes");
+                    }
+                    int sequence = readInt(data, 0);
+                    if (sequence != expectedSequence++) {
+                        throw new IOException("APNG frame-control sequence is out of order");
+                    }
+                    if (frames.size() >= limits.maxFrames) {
+                        throw new IOException("APNG exceeds the frame limit of " + limits.maxFrames);
+                    }
+                    FrameControl control = parseFrameControl(data, canvasWidth, canvasHeight);
+                    boolean defaultImageFrame = !seenIdat && frames.isEmpty();
+                    currentFrame = new FrameData(control, defaultImageFrame);
+                    frames.add(currentFrame);
+                }
+                case IDAT -> {
+                    if (!seenActl) {
+                        throw new IOException(".png3 must contain APNG animation control data");
+                    }
+                    if (colorType == 3 && !seenPlte) {
+                        throw new IOException("Indexed PNG image data requires a preceding PLTE");
+                    }
+                    if (currentFrame != null) {
+                        if (!currentFrame.usesDefaultImageData) {
+                            throw new IOException("APNG IDAT is not associated with the initial animation frame");
+                        }
+                        currentFrame.dataChunks.add(data);
+                    } else if (!frames.isEmpty()) {
+                        throw new IOException("APNG IDAT appears after animated frames have started");
+                    }
+                    seenIdat = true;
+                }
+                case FDAT -> {
+                    if (length < 4 || currentFrame == null || currentFrame.usesDefaultImageData) {
+                        throw new IOException("APNG fdAT has no active non-default frame");
+                    }
+                    int sequence = readInt(data, 0);
+                    if (sequence != expectedSequence++) {
+                        throw new IOException("APNG frame-data sequence is out of order");
+                    }
+                    currentFrame.dataChunks.add(Arrays.copyOfRange(data, 4, data.length));
+                }
+                case IEND -> {
+                    if (length != 0) {
+                        throw new IOException("PNG IEND must be empty");
+                    }
+                    seenIend = true;
+                }
+                case "PLTE" -> {
+                    if (seenPlte || seenTrns || seenIdat) {
+                        throw new IOException("PNG PLTE must appear once before tRNS and image data");
+                    }
+                    if (colorType == 0 || colorType == 4) {
+                        throw new IOException("PNG PLTE is not permitted for grayscale color type " + colorType);
+                    }
+                    if (length == 0 || length % 3 != 0 || length > 256 * 3) {
+                        throw new IOException("PNG PLTE must contain between one and 256 RGB entries");
+                    }
+                    paletteEntries = length / 3;
+                    if (colorType == 3 && paletteEntries > (1 << bitDepth)) {
+                        throw new IOException("PNG PLTE has more entries than indexed bit depth permits");
+                    }
+                    ancillaryBytes = reserveAncillaryBytes(ancillaryBytes, data.length);
+                    ancillary.add(new PngChunk(type, data));
+                    seenPlte = true;
+                }
+                case "tRNS" -> {
+                    if (seenTrns || seenIdat) {
+                        throw new IOException("PNG tRNS must appear once before image data");
+                    }
+                    switch (colorType) {
+                        case 0 -> {
+                            if (length != 2) {
+                                throw new IOException("Grayscale PNG tRNS must contain two bytes");
+                            }
+                        }
+                        case 2 -> {
+                            if (length != 6) {
+                                throw new IOException("Truecolor PNG tRNS must contain six bytes");
+                            }
+                        }
+                        case 3 -> {
+                            if (!seenPlte || length == 0 || length > paletteEntries) {
+                                throw new IOException("Indexed PNG tRNS requires a preceding PLTE and between one and one alpha entry per palette entry");
+                            }
+                        }
+                        default -> throw new IOException("PNG tRNS is not permitted for color type " + colorType);
+                    }
+                    ancillaryBytes = reserveAncillaryBytes(ancillaryBytes, data.length);
+                    ancillary.add(new PngChunk(type, data));
+                    seenTrns = true;
+                }
+                default -> {
+                    if (isCritical(type)) {
+                        throw new IOException("Unsupported critical PNG chunk " + type);
+                    }
+                }
+            }
+        }
+
+        if (!seenIhdr || !seenActl || !seenIend || frames.isEmpty() || declaredFrames != frames.size()) {
+            throw new IOException("APNG chunk structure does not describe a complete animation");
+        }
+        for (FrameData frame : frames) {
+            if (frame.dataChunks.isEmpty()) {
+                throw new IOException("APNG animation frame has no image data");
+            }
+        }
+
+        return new DecodedAnimation(compositeFrames(ihdr, canvasWidth, canvasHeight, ancillary, frames), totalPlays);
+    }
+
+    private List<AnimatedFrame> compositeFrames(byte[] ihdr, int canvasWidth, int canvasHeight,
+                                                 List<PngChunk> ancillary, List<FrameData> frameData) throws Exception {
+        int bitDepth = ihdr[8] & 0xFF;
+        int colorType = ihdr[9] & 0xFF;
+        int compression = ihdr[10] & 0xFF;
+        int filter = ihdr[11] & 0xFF;
+        int interlace = ihdr[12] & 0xFF;
+        BufferedImage canvas = new BufferedImage(canvasWidth, canvasHeight, BufferedImage.TYPE_INT_ARGB);
+        List<AnimatedFrame> result = new ArrayList<>(frameData.size());
+        long retainedPixels = 0;
+
+        for (FrameData frame : frameData) {
+            FrameControl control = frame.control;
+            limits.reserveFrame(result.size(), retainedPixels,
+                    limits.checkedPixels(canvasWidth, canvasHeight, "APNG output frame"), "APNG");
+            BufferedImage image = ImageIO.read(new ByteArrayInputStream(buildPng(
+                    control.width, control.height, bitDepth, colorType, compression, filter, interlace,
+                    ancillary, frame.dataChunks)));
+            if (image == null || image.getWidth() != control.width || image.getHeight() != control.height) {
+                throw new IOException("APNG frame cannot be decoded at its announced dimensions");
+            }
+
+            BufferedImage beforeDraw = control.disposeOp == 2 ? copyImage(canvas) : null;
+            Graphics2D graphics = canvas.createGraphics();
+            graphics.setComposite(control.blendOp == 0 ? AlphaComposite.Src : AlphaComposite.SrcOver);
+            graphics.drawImage(image, control.xOffset, control.yOffset, null);
+            graphics.dispose();
+
+            result.add(new AnimatedFrame(canvas, durationMs(control)));
+            retainedPixels += (long) canvasWidth * canvasHeight;
+
+            if (control.disposeOp == 1) {
+                Graphics2D clear = canvas.createGraphics();
+                clear.setComposite(AlphaComposite.Clear);
+                clear.fillRect(control.xOffset, control.yOffset, control.width, control.height);
+                clear.dispose();
+            } else if (control.disposeOp == 2) {
+                canvas = beforeDraw;
+            }
+        }
+        return List.copyOf(result);
+    }
+
+    private FrameControl parseFrameControl(byte[] data, int canvasWidth, int canvasHeight) throws IOException {
+        int width = readPositiveInt(data, 4, "APNG frame width");
+        int height = readPositiveInt(data, 8, "APNG frame height");
+        limits.checkedPixels(width, height, "APNG frame");
+        int xOffset = readNonNegativeInt(data, 12, "APNG frame X offset");
+        int yOffset = readNonNegativeInt(data, 16, "APNG frame Y offset");
+        if ((long) xOffset + width > canvasWidth || (long) yOffset + height > canvasHeight) {
+            throw new IOException("APNG frame lies outside the canvas");
+        }
+        int disposeOp = data[24] & 0xFF;
+        int blendOp = data[25] & 0xFF;
+        if (disposeOp > 2 || blendOp > 1) {
+            throw new IOException("APNG frame uses an unsupported blend or disposal operation");
+        }
+        return new FrameControl(width, height, xOffset, yOffset,
+                readShort(data, 20), readShort(data, 22), disposeOp, blendOp);
+    }
+
+    private void validateIhdr(byte[] ihdr) throws IOException {
+        int bitDepth = ihdr[8] & 0xFF;
+        int colorType = ihdr[9] & 0xFF;
+        int compression = ihdr[10] & 0xFF;
+        int filter = ihdr[11] & 0xFF;
+        int interlace = ihdr[12] & 0xFF;
+        if (compression != 0 || filter != 0 || interlace > 1 || !isValidColorType(bitDepth, colorType)) {
+            throw new IOException("PNG IHDR uses unsupported image parameters");
+        }
+    }
+
+    private boolean isValidColorType(int bitDepth, int colorType) {
+        return switch (colorType) {
+            case 0 -> bitDepth == 1 || bitDepth == 2 || bitDepth == 4 || bitDepth == 8 || bitDepth == 16;
+            case 2, 4, 6 -> bitDepth == 8 || bitDepth == 16;
+            case 3 -> bitDepth == 1 || bitDepth == 2 || bitDepth == 4 || bitDepth == 8;
+            default -> false;
+        };
+    }
+
+    private byte[] buildPng(int width, int height, int bitDepth, int colorType, int compression,
+                            int filter, int interlace, List<PngChunk> ancillary, List<byte[]> imageData) throws IOException {
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        output.write(PNG_SIGNATURE);
+        byte[] header = new byte[13];
+        writeInt(header, 0, width);
+        writeInt(header, 4, height);
+        header[8] = (byte) bitDepth;
+        header[9] = (byte) colorType;
+        header[10] = (byte) compression;
+        header[11] = (byte) filter;
+        header[12] = (byte) interlace;
+        writeChunk(output, IHDR, header);
+        for (PngChunk chunk : ancillary) {
+            writeChunk(output, chunk.type, chunk.data);
+        }
+        ByteArrayOutputStream compressed = new ByteArrayOutputStream();
+        for (byte[] chunk : imageData) {
+            compressed.write(chunk);
+        }
+        writeChunk(output, IDAT, compressed.toByteArray());
+        writeChunk(output, IEND, new byte[0]);
+        return output.toByteArray();
+    }
+
+    private void writeChunk(OutputStream output, String type, byte[] data) throws IOException {
+        byte[] typeBytes = type.getBytes(StandardCharsets.US_ASCII);
+        byte[] length = new byte[4];
+        writeInt(length, 0, data.length);
+        output.write(length);
+        output.write(typeBytes);
+        output.write(data);
         CRC32 crc = new CRC32();
         crc.update(typeBytes);
         crc.update(data);
         byte[] crcBytes = new byte[4];
         writeInt(crcBytes, 0, (int) crc.getValue());
-        out.write(crcBytes);
+        output.write(crcBytes);
     }
 
-    // ---- Byte utilities ----
+    private void verifyCrc(String type, byte[] data, long expected) throws IOException {
+        CRC32 crc = new CRC32();
+        crc.update(type.getBytes(StandardCharsets.US_ASCII));
+        crc.update(data);
+        if (crc.getValue() != expected) {
+            throw new IOException("PNG CRC mismatch for " + type);
+        }
+    }
+
+    private int reserveAncillaryBytes(int currentBytes, int dataLength) throws IOException {
+        if (currentBytes > limits.maxAncillaryBytes - dataLength) {
+            throw new IOException("APNG palette/transparency data exceeds the ancillary-data limit");
+        }
+        return currentBytes + dataLength;
+    }
+
+    private boolean isCritical(String type) {
+        return type.charAt(0) >= 'A' && type.charAt(0) <= 'Z';
+    }
+
+    private int durationMs(FrameControl control) {
+        int denominator = control.delayDenominator == 0 ? 100 : control.delayDenominator;
+        return (int) ((long) control.delayNumerator * 1000 / denominator);
+    }
+
+    private BufferedImage copyImage(BufferedImage source) {
+        BufferedImage copy = new BufferedImage(source.getWidth(), source.getHeight(), BufferedImage.TYPE_INT_ARGB);
+        Graphics2D graphics = copy.createGraphics();
+        graphics.drawImage(source, 0, 0, null);
+        graphics.dispose();
+        return copy;
+    }
+
+    private static long readUnsignedInt(byte[] data, int offset) {
+        return Integer.toUnsignedLong(readInt(data, offset));
+    }
+
+    private static int readPositiveInt(byte[] data, int offset, String description) throws IOException {
+        int value = readInt(data, offset);
+        if (value <= 0) {
+            throw new IOException(description + " must be positive");
+        }
+        return value;
+    }
+
+    private static int readNonNegativeInt(byte[] data, int offset, String description) throws IOException {
+        int value = readInt(data, offset);
+        if (value < 0) {
+            throw new IOException(description + " must not exceed the signed integer range");
+        }
+        return value;
+    }
 
     private static int readInt(byte[] data, int offset) {
-        return ((data[offset] & 0xFF) << 24)
-                | ((data[offset + 1] & 0xFF) << 16)
-                | ((data[offset + 2] & 0xFF) << 8)
-                | (data[offset + 3] & 0xFF);
+        return (data[offset] & 0xFF) << 24
+                | (data[offset + 1] & 0xFF) << 16
+                | (data[offset + 2] & 0xFF) << 8
+                | data[offset + 3] & 0xFF;
     }
 
     private static int readShort(byte[] data, int offset) {
-        return ((data[offset] & 0xFF) << 8) | (data[offset + 1] & 0xFF);
+        return (data[offset] & 0xFF) << 8 | data[offset + 1] & 0xFF;
+    }
+
+    private static String readType(byte[] data, int offset) throws IOException {
+        String type = new String(data, offset, 4, StandardCharsets.US_ASCII);
+        for (int index = 0; index < type.length(); index++) {
+            char value = type.charAt(index);
+            if ((value < 'A' || value > 'Z') && (value < 'a' || value > 'z')) {
+                throw new IOException("PNG chunk type contains invalid characters");
+            }
+        }
+        return type;
     }
 
     private static void writeInt(byte[] data, int offset, int value) {
-        data[offset] = (byte) ((value >> 24) & 0xFF);
-        data[offset + 1] = (byte) ((value >> 16) & 0xFF);
-        data[offset + 2] = (byte) ((value >> 8) & 0xFF);
-        data[offset + 3] = (byte) (value & 0xFF);
+        data[offset] = (byte) (value >>> 24);
+        data[offset + 1] = (byte) (value >>> 16);
+        data[offset + 2] = (byte) (value >>> 8);
+        data[offset + 3] = (byte) value;
+    }
+
+    private record PngChunk(String type, byte[] data) {
+    }
+
+    private record FrameControl(int width, int height, int xOffset, int yOffset,
+                                int delayNumerator, int delayDenominator, int disposeOp, int blendOp) {
+    }
+
+    private static final class FrameData {
+        private final FrameControl control;
+        private final boolean usesDefaultImageData;
+        private final List<byte[]> dataChunks = new ArrayList<>();
+
+        private FrameData(FrameControl control, boolean usesDefaultImageData) {
+            this.control = control;
+            this.usesDefaultImageData = usesDefaultImageData;
+        }
     }
 }

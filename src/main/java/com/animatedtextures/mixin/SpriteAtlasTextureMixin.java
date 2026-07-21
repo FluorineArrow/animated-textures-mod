@@ -1,7 +1,8 @@
 package com.animatedtextures.mixin;
 
 import com.animatedtextures.client.AnimatedTexturesClient;
-import com.animatedtextures.util.AnimatedTextureTickManager;
+import com.animatedtextures.util.AnimatedTextureReloadAttempt;
+import com.animatedtextures.util.AnimatedTextureReloadCoordinator;
 import net.minecraft.client.texture.SpriteAtlasTexture;
 import net.minecraft.client.texture.SpriteLoader;
 import org.spongepowered.asm.mixin.Mixin;
@@ -29,9 +30,12 @@ public abstract class SpriteAtlasTextureMixin {
     @Inject(method = "upload", at = @At("TAIL"))
     private void onUpload(SpriteLoader.StitchResult stitchResult, CallbackInfo ci) {
         SpriteAtlasTexture self = (SpriteAtlasTexture)(Object)this;
-        AnimatedTextureTickManager.scheduleAtlasScan(self);
+        AnimatedTextureReloadAttempt attempt = AnimatedTextureReloadCoordinator.currentAttempt();
+        if (attempt != null) {
+            attempt.recordAtlas(self, stitchResult.regions(), stitchResult.mipLevel());
+        }
         AnimatedTexturesClient.LOGGER.debug(
-            "[AnimatedTextures] Atlas '{}' upload complete, scan deferred until reload listeners finish.",
-            self.getId());
+            "[AnimatedTextures] Atlas '{}' upload complete for reload attempt {}.",
+            self.getId(), attempt == null ? "none" : attempt.sequence());
     }
 }

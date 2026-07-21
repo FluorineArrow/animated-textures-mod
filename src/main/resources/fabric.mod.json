@@ -8,7 +8,8 @@
     "AnimatedTexturesMod"
   ],
   "contact": {
-    "sources": "https://github.com/example/animated-textures-mod"
+    "sources": "https://github.com/FluorineArrow/animated-textures-mod",
+    "issues": "https://github.com/FluorineArrow/animated-textures-mod/issues"
   },
   "license": "MIT",
   "icon": "assets/animated_textures/icon.png",
@@ -20,11 +21,6 @@
     "modmenu": [
       "com.animatedtextures.client.AnimatedTexturesModMenu"
     ]
-  },
-  "custom": {
-    "modmenu": {
-      "badges": ["client"]
-    }
   },
   "mixins": [
     "animated_textures.mixins.json"

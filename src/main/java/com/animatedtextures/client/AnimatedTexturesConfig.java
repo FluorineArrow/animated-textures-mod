@@ -9,34 +9,15 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 
 /**
- * Configuration for Animated Textures mod.
- * Persisted as JSON in the game's config directory.
+ * Supported persisted settings for Animated Textures.
  */
-public class AnimatedTexturesConfig {
+public final class AnimatedTexturesConfig {
 
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
-    private static final Path CONFIG_PATH = FabricLoader.getInstance()
-            .getConfigDir().resolve("animated_textures.json");
+    private static AnimatedTexturesConfig instance;
 
-    private static AnimatedTexturesConfig INSTANCE;
-
-    // --- Config fields (serialized to JSON) ---
-
-    /** Scaling algorithm for upscaling animated textures */
+    /** Scaling algorithm for generated animation frames. */
     public ScalingMode scalingMode = ScalingMode.BILINEAR;
-
-    /** Whether to generate mipmaps for animated textures */
-    public boolean enableMipmaps = true;
-
-    /** Atlas size override. 0 = use Minecraft default (typically 1024).
-     *  Note: Atlas size override mixin is currently disabled pending correct method mapping.
-     *  Use high-resolution resource packs that set their own atlas size instead. */
-    public int atlasSize = 0;
-
-    /** Log level for animated texture operations (NONE, WARN, INFO, DEBUG) */
-    public LogLevel logLevel = LogLevel.WARN;
-
-    // --- Enums ---
 
     public enum ScalingMode {
         NEAREST("Nearest Neighbor (Fast)"),
@@ -58,74 +39,74 @@ public class AnimatedTexturesConfig {
         }
     }
 
-    public enum LogLevel {
-        NONE, WARN, INFO, DEBUG;
-
-        public LogLevel next() {
-            LogLevel[] values = values();
-            return values[(ordinal() + 1) % values.length];
-        }
-    }
-
-    // --- Singleton access ---
-
-    public static AnimatedTexturesConfig getInstance() {
-        if (INSTANCE == null) {
-            INSTANCE = load();
-        }
-        return INSTANCE;
-    }
-
     public static AnimatedTexturesConfig get() {
-        return getInstance();
+        if (instance == null) {
+            instance = load();
+        }
+        return instance;
     }
 
-    // --- Persistence ---
+    static AnimatedTexturesConfig parse(String json) {
+        try {
+            return sanitize(GSON.fromJson(json, AnimatedTexturesConfig.class));
+        } catch (Exception exception) {
+            return new AnimatedTexturesConfig();
+        }
+    }
+
+    static AnimatedTexturesConfig sanitize(AnimatedTexturesConfig config) {
+        if (config == null) {
+            return new AnimatedTexturesConfig();
+        }
+        if (config.scalingMode == null) {
+            config.scalingMode = ScalingMode.BILINEAR;
+        }
+        return config;
+    }
+
+    public AnimatedTexturesConfig copy() {
+        AnimatedTexturesConfig copy = new AnimatedTexturesConfig();
+        copy.scalingMode = scalingMode;
+        return copy;
+    }
+
+    public static void replaceAndSave(AnimatedTexturesConfig config) {
+        instance = sanitize(config);
+        instance.save();
+    }
 
     private static AnimatedTexturesConfig load() {
-        if (Files.exists(CONFIG_PATH)) {
-            try {
-                String json = Files.readString(CONFIG_PATH);
-                AnimatedTexturesConfig config = GSON.fromJson(json, AnimatedTexturesConfig.class);
-                AnimatedTexturesClient.LOGGER.info("[AnimatedTextures] Config loaded from {}", CONFIG_PATH);
-                return config;
-            } catch (Exception e) {
-                AnimatedTexturesClient.LOGGER.warn("[AnimatedTextures] Failed to load config, using defaults: {}", e.getMessage());
-            }
+        Path configPath = configPath();
+        if (!Files.exists(configPath)) {
+            return new AnimatedTexturesConfig();
         }
-        return new AnimatedTexturesConfig();
-    }
-
-    public void save() {
         try {
-            Files.createDirectories(CONFIG_PATH.getParent());
-            Files.writeString(CONFIG_PATH, GSON.toJson(this));
-            AnimatedTexturesClient.LOGGER.debug("[AnimatedTextures] Config saved to {}", CONFIG_PATH);
-        } catch (IOException e) {
-            AnimatedTexturesClient.LOGGER.warn("[AnimatedTextures] Failed to save config: {}", e.getMessage());
+            AnimatedTexturesConfig loaded = sanitize(GSON.fromJson(Files.readString(configPath), AnimatedTexturesConfig.class));
+            AnimatedTexturesClient.LOGGER.info("[AnimatedTextures] Config loaded from {}", configPath);
+            return loaded;
+        } catch (Exception exception) {
+            AnimatedTexturesClient.LOGGER.warn(
+                    "[AnimatedTextures] repair category=config action=defaulted reason={}", exception.getMessage());
+            return new AnimatedTexturesConfig();
         }
     }
 
-    // --- Convenience methods ---
+    private void save() {
+        Path configPath = configPath();
+        try {
+            Files.createDirectories(configPath.getParent());
+            Files.writeString(configPath, GSON.toJson(this));
+            AnimatedTexturesClient.LOGGER.debug("[AnimatedTextures] Config saved to {}", configPath);
+        } catch (IOException exception) {
+            AnimatedTexturesClient.LOGGER.warn("[AnimatedTextures] Failed to save config: {}", exception.getMessage());
+        }
+    }
 
-    /**
-     * Returns true if bilinear interpolation should be used for upscaling.
-     */
+    private static Path configPath() {
+        return FabricLoader.getInstance().getConfigDir().resolve("animated_textures.json");
+    }
+
     public boolean shouldUseBilinear() {
         return scalingMode == ScalingMode.BILINEAR;
-    }
-
-    /**
-     * Returns the effective atlas size. 0 means use Minecraft's default.
-     */
-    public int getEffectiveAtlasSize() {
-        return atlasSize;
-    }
-
-    /**
-     * Returns true if logging at the given level is enabled.
-     */
-    public boolean isLogEnabled(LogLevel level) {
-        return logLevel.ordinal() >= level.ordinal();
     }
 }

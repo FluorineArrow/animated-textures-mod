@@ -1,46 +1,47 @@
 package com.animatedtextures.util;
 
 import java.awt.image.BufferedImage;
+import java.util.Objects;
 
 /**
- * Represents a single frame in an animated texture (GIF or APNG).
+ * Immutable ARGB frame data retained by an animated texture.
  */
-public class AnimatedFrame {
+public final class AnimatedFrame {
 
-    /** The pixel data for this frame (ARGB format). */
     private final int[] pixels;
-
-    /** Width and height of this frame in pixels. */
     private final int width;
     private final int height;
-
-    /**
-     * Display duration of this frame in milliseconds.
-     * GIF frames use centiseconds internally but we convert to ms here.
-     */
     private final int durationMs;
 
     public AnimatedFrame(int[] pixels, int width, int height, int durationMs) {
+        Objects.requireNonNull(pixels, "pixels");
+        int expectedPixels = checkedPixelCount(width, height);
+        if (pixels.length != expectedPixels) {
+            throw new IllegalArgumentException("Pixel array length does not match frame dimensions");
+        }
         this.pixels = pixels.clone();
         this.width = width;
         this.height = height;
-        this.durationMs = Math.max(durationMs, 50); // Enforce minimum 50ms (20fps cap)
+        this.durationMs = Math.max(durationMs, 50);
     }
 
     public AnimatedFrame(BufferedImage image, int durationMs) {
+        Objects.requireNonNull(image, "image");
         this.width = image.getWidth();
         this.height = image.getHeight();
-        this.durationMs = Math.max(durationMs, 50);
-        this.pixels = new int[width * height];
+        this.pixels = new int[checkedPixelCount(width, height)];
         image.getRGB(0, 0, width, height, this.pixels, 0, width);
+        this.durationMs = Math.max(durationMs, 50);
     }
 
     /**
-     * Returns the frame's pixel data in ARGB format.
-     * Safe to return directly because the internal array is already a clone
-     * from construction, and the containing AnimatedTexture uses List.copyOf().
+     * Returns a defensive copy of the frame's ARGB pixels.
      */
     public int[] getPixels() {
+        return pixels.clone();
+    }
+
+    int[] pixelsUnsafe() {
         return pixels;
     }
 
@@ -54,5 +55,19 @@ public class AnimatedFrame {
 
     public int getDurationMs() {
         return durationMs;
+    }
+
+    private static int checkedPixelCount(int width, int height) {
+        if (width <= 0 || height <= 0) {
+            throw new IllegalArgumentException("Frame dimensions must be positive");
+        }
+        if (width > AnimatedImageLimits.DEFAULT.maxDimension || height > AnimatedImageLimits.DEFAULT.maxDimension) {
+            throw new IllegalArgumentException("Frame dimensions exceed supported limits");
+        }
+        long pixels = (long) width * height;
+        if (pixels > AnimatedImageLimits.DEFAULT.maxFramePixels) {
+            throw new IllegalArgumentException("Frame pixel count exceeds supported limits");
+        }
+        return (int) pixels;
     }
 }

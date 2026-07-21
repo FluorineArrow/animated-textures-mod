@@ -1,155 +1,186 @@
 package com.animatedtextures.util;
 
-import java.awt.image.BufferedImage;
-import java.io.ByteArrayOutputStream;
+import java.io.ByteArrayInputStream;
+import java.io.IOException;
 import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 
 /**
- * Pure-Java GIF89a decoder supporting animated GIFs.
- * Decodes all frames and their inter-frame delays.
- *
- * Based on the public-domain GIF decoder algorithm.
- *
- * Note: The caller is responsible for closing the InputStream.
+ * Pure-Java GIF87a/GIF89a decoder that composites all animation frames.
+ * The caller remains responsible for closing the supplied stream.
  */
 public class GifDecoder {
 
-    // --- Constants ---
     private static final int MAX_STACK_SIZE = 4096;
 
-    /** Maximum GIF file size (50 MB) to prevent OOM from malicious resource packs. */
-    private static final int MAX_FILE_SIZE = 50 * 1024 * 1024;
+    private final AnimatedImageLimits limits;
+    private final List<AnimatedFrame> frames = new ArrayList<>();
 
-    /** Maximum iterations in the LZW decoder to prevent infinite loops on corrupt data. */
-    private static final int MAX_LZW_ITERATIONS_MULTIPLIER = 3;
-
-    // --- Fields ---
     private InputStream in;
-    private int width, height;
-    private boolean hasGlobalColorTable;
-    private int bgIndex;
-    private int loopCount = 1;
-
+    private int width;
+    private int height;
     private int[] globalColorTable;
-    private int[] localColorTable;
     private int[] currentColorTable;
+    private int backgroundColor;
+    private int[] image;
+    private int[] previousImage;
+    private long retainedPixels;
 
-    // Per-frame fields
-    private int frameX, frameY, frameWidth, frameHeight;
+    private int frameX;
+    private int frameY;
+    private int frameWidth;
+    private int frameHeight;
     private boolean interlace;
     private int dispose;
     private boolean transparency;
-    private int transIndex;
-    private int delay; // centiseconds
+    private int transparentIndex;
+    private int delayCentiseconds;
+    private long totalPlays;
 
-    private byte[] block = new byte[256];
-    private int blockSize;
-
-    private int[] image;       // current frame pixels (ARGB)
-    private int[] lastImage;   // previous frame pixels
-
-    private final List<AnimatedFrame> frames = new ArrayList<>();
-
-    /**
-     * Read all frames from the given GIF stream.
-     * The stream is buffered into memory so we can enforce a size limit.
-     * Caller retains responsibility for closing the original stream.
-     *
-     * @param stream the GIF data input stream
-     * @return immutable list of decoded frames
-     * @throws Exception if the data is corrupt, too large, or not a valid GIF
-     */
-    public List<AnimatedFrame> decode(InputStream stream) throws Exception {
-        // Buffer the stream so we can check size and avoid streaming issues
-        ByteArrayOutputStream buffer = new ByteArrayOutputStream();
-        byte[] tmp = new byte[4096];
-        int total = 0;
-        int n;
-        while ((n = stream.read(tmp)) != -1) {
-            total += n;
-            if (total > MAX_FILE_SIZE) {
-                throw new Exception("GIF file too large: exceeds " + MAX_FILE_SIZE + " bytes");
-            }
-            buffer.write(tmp, 0, n);
-        }
-        byte[] data = buffer.toByteArray();
-        this.in = new java.io.ByteArrayInputStream(data);
-        frames.clear();
-        readHeader();
-        readContents();
-        return List.copyOf(frames);
+    GifDecoder(AnimatedImageLimits limits) {
+        this.limits = limits;
     }
 
-    // ---- Header ----
+    public GifDecoder(AnimatedTextureReloadBudget.Remaining remaining) {
+        this(AnimatedImageLimits.DEFAULT.forRemaining(remaining));
+    }
+
+    public GifDecoder() {
+        this(AnimatedImageLimits.DEFAULT);
+    }
+
+    /**
+     * Decodes frames only. Use {@link #decodeAnimation(InputStream)} to preserve playback metadata.
+     */
+    @Deprecated
+    public List<AnimatedFrame> decode(InputStream stream) throws Exception {
+        return decodeAnimation(stream).frames();
+    }
+
+    public DecodedAnimation decodeAnimation(InputStream stream) throws Exception {
+        resetState(new ByteArrayInputStream(limits.readBounded(stream, "GIF")));
+        readHeader();
+        readContents();
+        if (frames.isEmpty()) {
+            throw new IOException("GIF contains no image frames");
+        }
+        return new DecodedAnimation(frames, totalPlays);
+    }
+
+    private void resetState(InputStream stream) {
+        in = stream;
+        frames.clear();
+        width = 0;
+        height = 0;
+        globalColorTable = null;
+        currentColorTable = null;
+        backgroundColor = 0;
+        image = null;
+        previousImage = null;
+        retainedPixels = 0;
+        frameX = 0;
+        frameY = 0;
+        frameWidth = 0;
+        frameHeight = 0;
+        interlace = false;
+        totalPlays = 1;
+        resetGraphicControl();
+    }
 
     private void readHeader() throws Exception {
-        // Signature: GIF87a or GIF89a
-        byte[] sig = readBytes(6);
-        String header = new String(sig, 0, 3);
-        if (!header.equals("GIF")) throw new Exception("Not a GIF file");
+        String signature = new String(readBytes(6), StandardCharsets.US_ASCII);
+        if (!"GIF87a".equals(signature) && !"GIF89a".equals(signature)) {
+            throw new IOException("Not a GIF87a or GIF89a file");
+        }
 
-        // Logical screen descriptor
         width = readShort();
         height = readShort();
         int packed = read();
-        hasGlobalColorTable = (packed & 0x80) != 0;
-        int gctSize = 2 << (packed & 0x07);
-        bgIndex = read();
-        read(); // pixel aspect ratio (ignored)
+        boolean hasGlobalColorTable = (packed & 0x80) != 0;
+        int globalColorTableSize = 2 << (packed & 0x07);
+        int backgroundIndex = read();
+        read();
 
+        int pixelCount = limits.checkedPixels(width, height, "GIF logical screen");
         if (hasGlobalColorTable) {
-            globalColorTable = readColorTable(gctSize);
+            globalColorTable = readColorTable(globalColorTableSize);
+            if (backgroundIndex >= globalColorTable.length) {
+                throw new IOException("GIF logical-screen background index is outside the global color table");
+            }
+            backgroundColor = globalColorTable[backgroundIndex];
+        } else {
+            backgroundColor = 0;
         }
         currentColorTable = globalColorTable;
-
-        image = new int[width * height];
-        lastImage = new int[width * height];
+        image = new int[pixelCount];
+        Arrays.fill(image, backgroundColor);
     }
 
-    // ---- Content blocks ----
-
     private void readContents() throws Exception {
-        boolean done = false;
-        while (!done) {
-            int code = read();
-            switch (code) {
-                case 0x2C -> readImage();  // Image descriptor
-                case 0x21 -> {             // Extension
-                    int ext = read();
-                    switch (ext) {
-                        case 0xFF -> readApplicationExtension();
-                        case 0xF9 -> readGraphicControlExtension();
-                        default -> skip();
-                    }
+        while (true) {
+            switch (read()) {
+                case 0x2C -> readImage();
+                case 0x21 -> readExtension();
+                case 0x3B -> {
+                    return;
                 }
-                case 0x3B -> done = true;  // Trailer
-                default -> {}
+                default -> throw new IOException("Unexpected GIF block introducer");
             }
+        }
+    }
+
+    private void readExtension() throws Exception {
+        switch (read()) {
+            case 0xF9 -> readGraphicControlExtension();
+            case 0xFF -> readApplicationExtension();
+            case 0x01 -> {
+                skipSubBlocks();
+                resetGraphicControl();
+            }
+            default -> skipSubBlocks();
         }
     }
 
     private void readGraphicControlExtension() throws Exception {
-        read(); // block size (always 4)
+        if (read() != 4) {
+            throw new IOException("GIF graphic control extension must contain four bytes");
+        }
         int packed = read();
-        dispose = (packed & 0x1C) >> 2;
-        transparency = (packed & 0x01) != 0;
-        delay = readShort(); // centiseconds
-        transIndex = read();
-        read(); // block terminator
+        dispose = (packed & 0x1C) >>> 2;
+        if (dispose > 3) {
+            throw new IOException("GIF uses an unsupported disposal method");
+        }
+        transparency = (packed & 1) != 0;
+        delayCentiseconds = readShort();
+        transparentIndex = read();
+        if (read() != 0) {
+            throw new IOException("GIF graphic control extension is missing its terminator");
+        }
     }
 
     private void readApplicationExtension() throws Exception {
-        readBlock();
-        String app = new String(block, 0, Math.min(blockSize, 11));
-        if ("NETSCAPE2.0".equals(app) || "ANIMEXTS1.0".equals(app)) {
-            readBlock();
-            if (blockSize >= 3 && block[0] == 0x01) {
-                loopCount = (block[1] & 0xFF) | ((block[2] & 0xFF) << 8);
+        byte[] identifier = readSubBlock();
+        if (identifier.length == 0) {
+            throw new IOException("GIF application extension is missing its identifier");
+        }
+        boolean recognized = identifier.length == 11
+                && (Arrays.equals(identifier, "NETSCAPE2.0".getBytes(StandardCharsets.US_ASCII))
+                || Arrays.equals(identifier, "ANIMEXTS1.0".getBytes(StandardCharsets.US_ASCII)));
+        byte[] block;
+        boolean parsedLoop = false;
+        while ((block = readSubBlock()).length != 0) {
+            if (recognized && !parsedLoop && block.length == 3 && block[0] == 1) {
+                int repetitions = (block[1] & 0xFF) | (block[2] & 0xFF) << 8;
+                totalPlays = repetitions == 0 ? DecodedAnimation.INFINITE_PLAYS : (long) repetitions + 1;
+                parsedLoop = true;
             }
         }
-        skip();
+        if (recognized && !parsedLoop) {
+            throw new IOException("GIF loop application extension has no valid loop payload");
+        }
     }
 
     private void readImage() throws Exception {
@@ -157,242 +188,250 @@ public class GifDecoder {
         frameY = readShort();
         frameWidth = readShort();
         frameHeight = readShort();
-        int packed = read();
-        boolean hasLocalCT = (packed & 0x80) != 0;
-        interlace = (packed & 0x40) != 0;
-        int lctSize = 2 << (packed & 0x07);
+        validateFrameRectangle();
 
-        if (hasLocalCT) {
-            localColorTable = readColorTable(lctSize);
-            currentColorTable = localColorTable;
+        int packed = read();
+        boolean hasLocalColorTable = (packed & 0x80) != 0;
+        interlace = (packed & 0x40) != 0;
+        if (hasLocalColorTable) {
+            currentColorTable = readColorTable(2 << (packed & 0x07));
         } else {
             currentColorTable = globalColorTable;
         }
+        if (currentColorTable == null) {
+            throw new IOException("GIF image frame has no color table");
+        }
 
-        // Save previous frame for dispose=3 (restore to previous)
-        System.arraycopy(image, 0, lastImage, 0, image.length);
+        int canvasPixels = limits.checkedPixels(width, height, "GIF frame canvas");
+        limits.reserveFrame(frames.size(), retainedPixels, canvasPixels, "GIF");
+        if (dispose == 3) {
+            previousImage = image.clone();
+        }
 
         decodeImageData();
-        bakeFrame();
 
-        // Convert delay: GIF centiseconds → milliseconds
-        int durationMs = delay * 10;
-        if (durationMs == 0) durationMs = 100; // default 100ms for no-delay GIFs
+        int durationMs = delayCentiseconds == 0 ? 100 : delayCentiseconds * 10;
+        frames.add(new AnimatedFrame(image, width, height, durationMs));
+        retainedPixels += canvasPixels;
 
-        // Create ARGB copy for the frame
-        int[] frameCopy = image.clone();
-        BufferedImage bi = new BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB);
-        bi.setRGB(0, 0, width, height, frameCopy, 0, width);
-        frames.add(new AnimatedFrame(bi, durationMs));
-
-        // Handle disposal
         if (dispose == 2) {
-            // DISPOSE_OP_BACKGROUND: clear frame region to transparent (per GIF89a spec)
-            fillRect(image, frameX, frameY, frameWidth, frameHeight, 0);
+            fillRect(image, frameX, frameY, frameWidth, frameHeight, backgroundColor);
         } else if (dispose == 3) {
-            System.arraycopy(lastImage, 0, image, 0, image.length);
+            System.arraycopy(previousImage, 0, image, 0, image.length);
+            previousImage = null;
         }
-        dispose = 0;
-        transparency = false;
-        delay = 0;
+        resetGraphicControl();
     }
 
-    private void bakeFrame() {
-        // Apply current frame pixels into the composite image buffer
-        // (already done by decodeImageData)
+    private void validateFrameRectangle() throws IOException {
+        limits.checkedPixels(frameWidth, frameHeight, "GIF image frame");
+        long right = (long) frameX + frameWidth;
+        long bottom = (long) frameY + frameHeight;
+        if (right > width || bottom > height) {
+            throw new IOException("GIF image frame lies outside the logical screen");
+        }
     }
-
-    // ---- LZW Decoder ----
 
     private void decodeImageData() throws Exception {
-        int minCodeSize = read();
-        int clearCode = 1 << minCodeSize;
-        int eofCode = clearCode + 1;
+        int minimumCodeSize = read();
+        if (minimumCodeSize < 2 || minimumCodeSize > 8) {
+            throw new IOException("GIF LZW minimum code size must be between 2 and 8");
+        }
 
+        int clearCode = 1 << minimumCodeSize;
+        int endCode = clearCode + 1;
         short[] prefix = new short[MAX_STACK_SIZE];
         byte[] suffix = new byte[MAX_STACK_SIZE];
         byte[] pixelStack = new byte[MAX_STACK_SIZE + 1];
-
-        int top = 0, first = 0, bi = 0, pi = 0;
-        int codeSize = minCodeSize + 1;
-        int codeMask = (1 << codeSize) - 1;
-        int available = clearCode + 2;
-        int oldCode = -1;
-
-        for (int i = 0; i < clearCode; i++) {
-            prefix[i] = 0;
-            suffix[i] = (byte) i;
+        for (int index = 0; index < clearCode; index++) {
+            suffix[index] = (byte) index;
         }
 
-        // Data sub-blocks
-        int datum = 0, bits = 0, count = 0, inCode, code;
-        byte[] data = new byte[256];
-        int dataLen = 0;
-        int dataPos = 0;
+        int available = clearCode + 2;
+        int codeSize = minimumCodeSize + 1;
+        int codeMask = (1 << codeSize) - 1;
+        int oldCode = -1;
+        int first = 0;
+        int stackTop = 0;
+        int datum = 0;
+        int bits = 0;
+        byte[] data = new byte[0];
+        int dataOffset = 0;
 
-        int pixelCount = frameWidth * frameHeight;
-        int[] line = interlace ? new int[]{0, 4, 2, 1} : new int[]{0};
-        int[] lineInc = interlace ? new int[]{8, 8, 4, 2} : new int[]{1};
+        int[] interlaceStarts = {0, 4, 2, 1};
+        int[] interlaceSteps = {8, 8, 4, 2};
         int pass = 0;
-        int ix = 0, iy = interlace ? line[0] : 0;
-        int safetyCounter = 0;
-        int maxIterations = pixelCount * MAX_LZW_ITERATIONS_MULTIPLIER;
+        int x = 0;
+        int y = interlace ? interlaceStarts[0] : 0;
+        int expectedPixels = frameWidth * frameHeight;
+        int writtenPixels = 0;
+        long decodedCodes = 0;
+        long maximumCodes = Math.max(1L, (long) in.available() * 4);
 
-        outer:
-        for (int p = 0; p < pixelCount; ) {
-            // Safety check: prevent infinite loops on corrupt GIF data
-            if (++safetyCounter > maxIterations) {
-                System.err.println("[AnimatedTextures] GIF LZW decoder exceeded safety limit, data may be corrupt.");
-                break;
-            }
-            if (top == 0) {
-                if (bits < codeSize) {
-                    if (dataPos >= dataLen) {
-                        dataLen = readBlock();
-                        if (dataLen <= 0) break;
-                        data = new byte[dataLen];
-                        System.arraycopy(block, 0, data, 0, dataLen);
-                        dataPos = 0;
+        while (writtenPixels < expectedPixels) {
+            if (stackTop == 0) {
+                while (bits < codeSize) {
+                    if (dataOffset >= data.length) {
+                        data = readSubBlock();
+                        dataOffset = 0;
+                        if (data.length == 0) {
+                            throw new IOException("GIF image data ended before its frame was complete");
+                        }
                     }
-                    datum += (data[dataPos++] & 0xFF) << bits;
+                    datum |= (data[dataOffset++] & 0xFF) << bits;
                     bits += 8;
-                    continue;
                 }
-                code = datum & codeMask;
-                datum >>= codeSize;
-                bits -= codeSize;
 
+                int code = datum & codeMask;
+                if (++decodedCodes > maximumCodes) {
+                    throw new IOException("GIF LZW data exceeds the encoded-data safety limit");
+                }
+                datum >>>= codeSize;
+                bits -= codeSize;
                 if (code == clearCode) {
-                    codeSize = minCodeSize + 1;
-                    codeMask = (1 << codeSize) - 1;
                     available = clearCode + 2;
+                    codeSize = minimumCodeSize + 1;
+                    codeMask = (1 << codeSize) - 1;
                     oldCode = -1;
                     continue;
                 }
-                if (code == eofCode || code > available) break;
-
+                if (code == endCode) {
+                    throw new IOException("GIF image data ended before its frame was complete");
+                }
+                if (code > available) {
+                    throw new IOException("GIF LZW code exceeds the current dictionary");
+                }
                 if (oldCode == -1) {
-                    pixelStack[top++] = suffix[code];
+                    if (code >= clearCode) {
+                        throw new IOException("GIF LZW stream starts with an invalid code");
+                    }
+                    pixelStack[stackTop++] = suffix[code];
                     oldCode = code;
                     first = code;
                     continue;
                 }
-                inCode = code;
-                if (code >= available) {
-                    pixelStack[top++] = (byte) first;
+
+                int inputCode = code;
+                if (code == available) {
+                    if (stackTop >= pixelStack.length) {
+                        throw new IOException("GIF LZW pixel stack overflow");
+                    }
+                    pixelStack[stackTop++] = (byte) first;
                     code = oldCode;
                 }
                 while (code >= clearCode) {
-                    pixelStack[top++] = suffix[code];
+                    if (code >= available || stackTop >= pixelStack.length) {
+                        throw new IOException("GIF LZW dictionary is malformed");
+                    }
+                    pixelStack[stackTop++] = suffix[code];
                     code = prefix[code];
                 }
                 first = suffix[code] & 0xFF;
-                pixelStack[top++] = (byte) first;
+                if (stackTop >= pixelStack.length) {
+                    throw new IOException("GIF LZW pixel stack overflow");
+                }
+                pixelStack[stackTop++] = (byte) first;
 
                 if (available < MAX_STACK_SIZE) {
                     prefix[available] = (short) oldCode;
                     suffix[available] = (byte) first;
                     available++;
-                    if (((available & codeMask) == 0) && (available < MAX_STACK_SIZE)) {
+                    if (available == (1 << codeSize) && available < MAX_STACK_SIZE) {
                         codeSize++;
                         codeMask = (1 << codeSize) - 1;
                     }
                 }
-                oldCode = inCode;
+                oldCode = inputCode;
             }
 
-            top--;
-            int colorIndex = pixelStack[top] & 0xFF;
-            int argb;
-            if (transparency && colorIndex == transIndex) {
-                argb = 0; // transparent
-            } else {
-                argb = (colorIndex < currentColorTable.length)
-                        ? currentColorTable[colorIndex] : 0xFF000000;
-                argb |= 0xFF000000; // ensure fully opaque
+            int colorIndex = pixelStack[--stackTop] & 0xFF;
+            if (!(transparency && colorIndex == transparentIndex)) {
+                if (colorIndex >= currentColorTable.length) {
+                    throw new IOException("GIF color index is outside its color table");
+                }
+                image[(frameY + y) * width + frameX + x] = currentColorTable[colorIndex];
             }
 
-            // Write pixel to composite image
-            int px = frameX + ix;
-            int py = frameY + iy;
-            if (px < width && py < height) {
-                image[py * width + px] = argb;
-            }
-
-            ix++;
-            if (ix >= frameWidth) {
-                ix = 0;
+            x++;
+            if (x == frameWidth) {
+                x = 0;
                 if (interlace) {
-                    iy += lineInc[pass];
-                    while (pass < 3 && iy >= frameHeight) {
+                    y += interlaceSteps[pass];
+                    while (y >= frameHeight && pass < 3) {
                         pass++;
-                        iy = line[pass];
+                        y = interlaceStarts[pass];
                     }
                 } else {
-                    iy++;
+                    y++;
                 }
             }
-            p++;
+            writtenPixels++;
         }
 
-        // Drain remaining sub-blocks
-        while (readBlock() > 0) {}
+        while (readSubBlock().length != 0) {
+            // Consume remaining image data before the next GIF block.
+        }
     }
-
-    // ---- Color table ----
 
     private int[] readColorTable(int size) throws Exception {
-        int count = size * 3;
-        byte[] raw = readBytes(count);
-        int[] ct = new int[size];
-        for (int i = 0; i < size; i++) {
-            int r = raw[i * 3] & 0xFF;
-            int g = raw[i * 3 + 1] & 0xFF;
-            int b = raw[i * 3 + 2] & 0xFF;
-            ct[i] = 0xFF000000 | (r << 16) | (g << 8) | b;
+        byte[] raw = readBytes(size * 3);
+        int[] colors = new int[size];
+        for (int index = 0; index < size; index++) {
+            int red = raw[index * 3] & 0xFF;
+            int green = raw[index * 3 + 1] & 0xFF;
+            int blue = raw[index * 3 + 2] & 0xFF;
+            colors[index] = 0xFF000000 | (red << 16) | (green << 8) | blue;
         }
-        return ct;
+        return colors;
     }
 
-    // ---- Utilities ----
+    private void resetGraphicControl() {
+        dispose = 0;
+        transparency = false;
+        transparentIndex = 0;
+        delayCentiseconds = 0;
+    }
 
-    private void fillRect(int[] buf, int x, int y, int w, int h, int color) {
-        for (int row = y; row < y + h && row < height; row++) {
-            for (int col = x; col < x + w && col < width; col++) {
-                buf[row * width + col] = color;
+    private void fillRect(int[] pixels, int x, int y, int rectangleWidth, int rectangleHeight, int color) {
+        for (int row = y; row < y + rectangleHeight; row++) {
+            for (int column = x; column < x + rectangleWidth; column++) {
+                pixels[row * width + column] = color;
             }
         }
     }
 
-    private int read() throws Exception {
-        int b = in.read();
-        if (b < 0) throw new Exception("Unexpected end of GIF stream");
-        return b;
-    }
-
-    private int readShort() throws Exception {
-        return read() | (read() << 8);
-    }
-
-    private byte[] readBytes(int n) throws Exception {
-        byte[] buf = new byte[n];
-        int read = 0;
-        while (read < n) {
-            int r = in.read(buf, read, n - read);
-            if (r < 0) throw new Exception("Unexpected end of stream");
-            read += r;
+    private int read() throws IOException {
+        int value = in.read();
+        if (value < 0) {
+            throw new IOException("Unexpected end of GIF stream");
         }
-        return buf;
+        return value;
     }
 
-    private int readBlock() throws Exception {
-        blockSize = read();
-        if (blockSize == 0) return 0;
-        block = readBytes(blockSize);
-        return blockSize;
+    private int readShort() throws IOException {
+        return read() | read() << 8;
     }
 
-    private void skip() throws Exception {
-        while (readBlock() > 0) {}
+    private byte[] readBytes(int length) throws IOException {
+        byte[] bytes = new byte[length];
+        int offset = 0;
+        while (offset < length) {
+            int read = in.read(bytes, offset, length - offset);
+            if (read < 0) {
+                throw new IOException("Unexpected end of GIF stream");
+            }
+            offset += read;
+        }
+        return bytes;
+    }
+
+    private byte[] readSubBlock() throws IOException {
+        return readBytes(read());
+    }
+
+    private void skipSubBlocks() throws IOException {
+        while (readSubBlock().length != 0) {
+            // Skip an unneeded extension payload.
+        }
     }
 }

@@ -4,209 +4,200 @@ import com.animatedtextures.client.AnimatedTexturesConfig;
 import net.minecraft.client.texture.NativeImage;
 import net.minecraft.util.Identifier;
 
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 
 /**
- * Holds all frames for a single animated texture and manages the current
- * frame pointer. Updated every client tick via the tick manager.
+ * Holds all frames for one animated texture and manages its displayed frame.
  */
-public class AnimatedTexture {
+public final class AnimatedTexture {
 
     private final Identifier sourceId;
     private final List<AnimatedFrame> frames;
     private final int totalWidth;
     private final int totalHeight;
+    private final Identifier targetTextureId;
+    private final long cycleDurationMs;
+    private final long totalPlays;
 
-    private volatile int currentFrameIndex = 0;
-    private volatile long lastFrameTime = -1; // -1 = not yet initialized; set on first tick
+    private int currentFrameIndex;
+    private long elapsedInFrameMs;
+    private long completedPlays;
+    private long frameRevision;
+    private boolean finished;
 
     public AnimatedTexture(Identifier sourceId, List<AnimatedFrame> frames) {
-        if (frames == null || frames.isEmpty()) {
-            throw new IllegalArgumentException("AnimatedTexture must have at least one frame: " + sourceId);
-        }
-        this.sourceId = sourceId;
-        this.frames = List.copyOf(frames);
-        // Normalize: all frames are expected to be the same dimensions
+        this(sourceId, new DecodedAnimation(frames, DecodedAnimation.INFINITE_PLAYS));
+    }
+
+    public AnimatedTexture(Identifier sourceId, DecodedAnimation animation) {
+        this.sourceId = Objects.requireNonNull(sourceId, "sourceId");
+        Objects.requireNonNull(animation, "animation");
+        this.frames = animation.frames();
+        this.totalPlays = animation.totalPlays();
         this.totalWidth = frames.get(0).getWidth();
         this.totalHeight = frames.get(0).getHeight();
-    }
-
-    /**
-     * Called each game tick (~every 50ms). Advances the frame if the current
-     * frame's duration has elapsed.
-     */
-    public void tick(long currentTimeMs) {
-        if (frames.size() <= 1) return;
-
-        // Initialize lastFrameTime on first tick so frame 0 displays for its full duration
-        if (lastFrameTime < 0) {
-            lastFrameTime = currentTimeMs;
-            return;
-        }
-
-        AnimatedFrame current = frames.get(currentFrameIndex);
-        if (currentTimeMs - lastFrameTime >= current.getDurationMs()) {
-            currentFrameIndex = (currentFrameIndex + 1) % frames.size();
-            lastFrameTime = currentTimeMs;
-        }
-    }
-
-    /**
-     * Builds a NativeImage containing the current frame's pixels,
-     * suitable for uploading to the GPU texture.
-     */
-    public NativeImage getCurrentFrameAsNativeImage() {
-        AnimatedFrame frame = frames.get(currentFrameIndex);
-        NativeImage image = new NativeImage(NativeImage.Format.RGBA, frame.getWidth(), frame.getHeight(), false);
-        int[] pixels = frame.getPixels();
-        for (int y = 0; y < frame.getHeight(); y++) {
-            for (int x = 0; x < frame.getWidth(); x++) {
-                int argb = pixels[y * frame.getWidth() + x];
-                // Convert ARGB -> RGBA (Minecraft's NativeImage expects RGBA, little-endian ABGR on GPU)
-                int a = (argb >> 24) & 0xFF;
-                int r = (argb >> 16) & 0xFF;
-                int g = (argb >> 8) & 0xFF;
-                int b = argb & 0xFF;
-                // NativeImage.setColor expects ABGR packed
-                // NativeImage.setColor expects ABGR packed int
-                image.setColor(x, y, (a << 24) | (b << 16) | (g << 8) | r);
+        long durationMs = 0;
+        for (AnimatedFrame frame : this.frames) {
+            if (frame.getWidth() != totalWidth || frame.getHeight() != totalHeight) {
+                throw new IllegalArgumentException("AnimatedTexture frames must have identical dimensions: " + sourceId);
+            }
+            try {
+                durationMs = Math.addExact(durationMs, frame.getDurationMs());
+            } catch (ArithmeticException exception) {
+                throw new IllegalArgumentException("AnimatedTexture cycle duration is too large: " + sourceId, exception);
             }
         }
-        return image;
+        this.cycleDurationMs = durationMs;
+        this.targetTextureId = toTextureIdentifier(sourceId);
     }
 
     /**
-     * Returns a resized copy of the current frame as a NativeImage.
-     * Uses nearest-neighbor sampling to scale to the target dimensions.
-     * This allows animated textures at any resolution (16×16, 32×32, 64×64, etc.)
-     * to match the sprite's allocated region in the atlas.
+     * Advances the animation by the supplied elapsed time.
      *
-     * @param targetW target width (sprite width in atlas)
-     * @param targetH target height (sprite height in atlas)
+     * @return true if at least one frame transition occurred
      */
-    public NativeImage getCurrentFrameAsNativeImage(int targetW, int targetH) {
-        AnimatedFrame frame = frames.get(currentFrameIndex);
-        int srcW = frame.getWidth();
-        int srcH = frame.getHeight();
-
-        // Fast path: dimensions match, no resize needed
-        if (srcW == targetW && srcH == targetH) {
-            return getCurrentFrameAsNativeImage();
+    public boolean tick(long elapsedMs) {
+        if (elapsedMs < 0) {
+            throw new IllegalArgumentException("Elapsed time must not be negative");
         }
-
-        NativeImage image = new NativeImage(NativeImage.Format.RGBA, targetW, targetH, false);
-        int[] pixels = frame.getPixels();
-
-        for (int y = 0; y < targetH; y++) {
-            int srcY = (int) ((long) y * srcH / targetH);
-            for (int x = 0; x < targetW; x++) {
-                int srcX = (int) ((long) x * srcW / targetW);
-                int argb = pixels[srcY * srcW + srcX];
-                int a = (argb >> 24) & 0xFF;
-                int r = (argb >> 16) & 0xFF;
-                int g = (argb >> 8) & 0xFF;
-                int b = argb & 0xFF;
-                image.setColor(x, y, (a << 24) | (b << 16) | (g << 8) | r);
+        if (elapsedMs == 0 || finished) {
+            return false;
+        }
+        if (frames.size() == 1) {
+            return tickSingleFrame(elapsedMs);
+        }
+        long wholeCycles = elapsedMs / cycleDurationMs;
+        long elapsedRemainder = elapsedMs % cycleDurationMs;
+        long combinedRemainder = elapsedInFrameMs + elapsedRemainder;
+        if (combinedRemainder >= cycleDurationMs) {
+            combinedRemainder -= cycleDurationMs;
+            wholeCycles++;
+        }
+        elapsedInFrameMs = combinedRemainder;
+        boolean changed = false;
+        long cyclesToSkip = wholeCycles;
+        if (cyclesToSkip > 0) {
+            if (totalPlays == DecodedAnimation.INFINITE_PLAYS) {
+                frameRevision += cyclesToSkip * frames.size();
+                completedPlays += cyclesToSkip;
+                changed = true;
+            } else {
+                long nonterminalCycles = Math.max(0, totalPlays - completedPlays - 1);
+                long skippedCycles = Math.min(cyclesToSkip, nonterminalCycles);
+                if (skippedCycles > 0) {
+                    completedPlays += skippedCycles;
+                    frameRevision += skippedCycles * frames.size();
+                    changed = true;
+                }
+                if (cyclesToSkip > skippedCycles) {
+                    elapsedInFrameMs += cycleDurationMs;
+                }
             }
         }
-        return image;
-    }
-
-    /**
-     * Returns a resized copy of the current frame using bilinear interpolation.
-     * Produces smoother results than nearest-neighbor when upscaling, which is
-     * ideal for high-resolution resource packs.
-     *
-     * @param targetW target width (sprite width in atlas)
-     * @param targetH target height (sprite height in atlas)
-     */
-    public NativeImage getCurrentFrameAsNativeImageBilinear(int targetW, int targetH) {
-        AnimatedFrame frame = frames.get(currentFrameIndex);
-        int srcW = frame.getWidth();
-        int srcH = frame.getHeight();
-
-        // Fast path: dimensions match, no resize needed
-        if (srcW == targetW && srcH == targetH) {
-            return getCurrentFrameAsNativeImage();
-        }
-
-        // For downscaling, fall back to nearest-neighbor (faster, no aliasing issues)
-        if (targetW < srcW || targetH < srcH) {
-            return getCurrentFrameAsNativeImage(targetW, targetH);
-        }
-
-        NativeImage image = new NativeImage(NativeImage.Format.RGBA, targetW, targetH, false);
-        int[] pixels = frame.getPixels();
-
-        for (int y = 0; y < targetH; y++) {
-            // Calculate source Y with floating point precision
-            float srcYf = (float) y * srcH / targetH;
-            int y0 = (int) Math.floor(srcYf);
-            int y1 = Math.min(y0 + 1, srcH - 1);
-            float fy = srcYf - y0;
-
-            for (int x = 0; x < targetW; x++) {
-                float srcXf = (float) x * srcW / targetW;
-                int x0 = (int) Math.floor(srcXf);
-                int x1 = Math.min(x0 + 1, srcW - 1);
-                float fx = srcXf - x0;
-
-                // Get 4 neighboring pixels (ARGB format)
-                int p00 = pixels[y0 * srcW + x0];
-                int p10 = pixels[y0 * srcW + x1];
-                int p01 = pixels[y1 * srcW + x0];
-                int p11 = pixels[y1 * srcW + x1];
-
-                // Bilinear interpolation for each channel
-                int a = bilinearChannel((p00 >> 24) & 0xFF, (p10 >> 24) & 0xFF,
-                                       (p01 >> 24) & 0xFF, (p11 >> 24) & 0xFF, fx, fy);
-                int r = bilinearChannel((p00 >> 16) & 0xFF, (p10 >> 16) & 0xFF,
-                                       (p01 >> 16) & 0xFF, (p11 >> 16) & 0xFF, fx, fy);
-                int g = bilinearChannel((p00 >> 8) & 0xFF, (p10 >> 8) & 0xFF,
-                                       (p01 >> 8) & 0xFF, (p11 >> 8) & 0xFF, fx, fy);
-                int b = bilinearChannel(p00 & 0xFF, p10 & 0xFF,
-                                       p01 & 0xFF, p11 & 0xFF, fx, fy);
-
-                // Pack ABGR for NativeImage
-                image.setColor(x, y, (a << 24) | (b << 16) | (g << 8) | r);
+        while (elapsedInFrameMs >= frames.get(currentFrameIndex).getDurationMs()) {
+            elapsedInFrameMs -= frames.get(currentFrameIndex).getDurationMs();
+            if (currentFrameIndex == frames.size() - 1) {
+                if (totalPlays != DecodedAnimation.INFINITE_PLAYS && completedPlays + 1 >= totalPlays) {
+                    completedPlays = totalPlays;
+                    elapsedInFrameMs = 0;
+                    finished = true;
+                    break;
+                }
+                completedPlays++;
+                currentFrameIndex = 0;
+            } else {
+                currentFrameIndex++;
             }
+            frameRevision++;
+            changed = true;
         }
-        return image;
+        return changed;
     }
 
-    /**
-     * Performs bilinear interpolation on a single color channel.
-     */
-    private static int bilinearChannel(int c00, int c10, int c01, int c11, float fx, float fy) {
-        float top = c00 * (1 - fx) + c10 * fx;
-        float bottom = c01 * (1 - fx) + c11 * fx;
-        return Math.round(top * (1 - fy) + bottom * fy);
+    private boolean tickSingleFrame(long elapsedMs) {
+        if (totalPlays == DecodedAnimation.INFINITE_PLAYS) {
+            return false;
+        }
+        long durationMs = frames.get(0).getDurationMs();
+        long playsElapsed = elapsedMs / durationMs;
+        long remainder = elapsedMs % durationMs;
+        long combinedRemainder = elapsedInFrameMs + remainder;
+        if (combinedRemainder >= durationMs) {
+            combinedRemainder -= durationMs;
+            playsElapsed++;
+        }
+        elapsedInFrameMs = combinedRemainder;
+        long playsRemaining = totalPlays - completedPlays;
+        if (playsElapsed >= playsRemaining) {
+            completedPlays = totalPlays;
+            elapsedInFrameMs = 0;
+            finished = true;
+        } else {
+            completedPlays += playsElapsed;
+        }
+        return false;
     }
 
-    /**
-     * Returns a resized copy of the current frame using the configured scaling mode.
-     * This is the main entry point for frame scaling.
-     *
-     * @param targetW target width (sprite width in atlas)
-     * @param targetH target height (sprite height in atlas)
-     */
-    public NativeImage getCurrentFrameResized(int targetW, int targetH) {
-        if (AnimatedTexturesConfig.get().shouldUseBilinear()) {
-            return getCurrentFrameAsNativeImageBilinear(targetW, targetH);
+    public NativeImage getCurrentFrameResized(int targetWidth, int targetHeight) {
+        if (targetWidth <= 0 || targetHeight <= 0) {
+            throw new IllegalArgumentException("Target dimensions must be positive");
         }
-        return getCurrentFrameAsNativeImage(targetW, targetH);
+        AnimatedFrame frame = frames.get(currentFrameIndex);
+        if (AnimatedTexturesConfig.get().shouldUseBilinear()
+                && targetWidth >= frame.getWidth() && targetHeight >= frame.getHeight()) {
+            return renderBilinear(frame, targetWidth, targetHeight);
+        }
+        return renderNearest(frame, targetWidth, targetHeight);
     }
 
     public Identifier getSourceId() {
         return sourceId;
     }
 
+    public Identifier getTargetTextureId() {
+        return targetTextureId;
+    }
+
+    /**
+     * Returns ordered sprite IDs valid for the given vanilla atlas.
+     */
+    public List<Identifier> getSpriteIdCandidates(Identifier atlasId) {
+        List<Identifier> candidates = new ArrayList<>();
+        candidates.add(targetTextureId);
+        String targetPath = targetTextureId.getPath();
+        if ("textures/atlas/mob_effects.png".equals(atlasId.getPath()) && targetPath.startsWith("mob_effect/")) {
+            candidates.add(Identifier.of(sourceId.getNamespace(), targetPath.substring("mob_effect/".length())));
+        }
+        if ("textures/atlas/gui.png".equals(atlasId.getPath()) && targetPath.startsWith("gui/sprites/")) {
+            candidates.add(Identifier.of(sourceId.getNamespace(), targetPath.substring("gui/sprites/".length())));
+        }
+        return List.copyOf(candidates);
+    }
+
     public int getFrameCount() {
         return frames.size();
     }
 
+    List<AnimatedFrame> frames() {
+        return frames;
+    }
+
     public int getCurrentFrameIndex() {
         return currentFrameIndex;
+    }
+
+    public long getFrameRevision() {
+        return frameRevision;
+    }
+
+    public boolean isFinished() {
+        return finished;
+    }
+
+    public long getTotalPlays() {
+        return totalPlays;
     }
 
     public int getTotalWidth() {
@@ -217,63 +208,106 @@ public class AnimatedTexture {
         return totalHeight;
     }
 
-    /**
-     * Returns the identifier matching what SpriteContents.getId() returns.
-     * SpriteContents id format: "minecraft:block/gold_ore"  (no textures/, no .png)
-     *
-     * ResourceManager gives us:  "minecraft:textures/block/gold_ore.gif"
-     * We convert to:             "minecraft:block/gold_ore"
-     *
-     * Special case: mob_effect textures use a dedicated atlas with prefix="",
-     * so sprites get bare registry names (e.g. "minecraft:fire_resistance").
-     * We register both IDs so the sprite can be found in either atlas format.
-     */
-    public Identifier getTargetTextureId() {
-        String path = sourceId.getPath(); // e.g. "textures/block/gold_ore.gif"
-
-        // Strip "textures/" prefix
-        if (path.startsWith("textures/")) {
-            path = path.substring("textures/".length()); // "block/gold_ore.gif"
+    private static Identifier toTextureIdentifier(Identifier sourceId) {
+        String path = sourceId.getPath();
+        if (!path.startsWith("textures/")) {
+            throw new IllegalArgumentException("Animated texture must be under textures/: " + sourceId);
         }
-
-        // Strip the animated extension entirely (SpriteContents id has no extension)
-        if (path.endsWith(".gif")) {
-            path = path.substring(0, path.length() - 4);       // "block/gold_ore"
-        } else if (path.endsWith(".png3")) {
-            path = path.substring(0, path.length() - 5);       // "block/gold_ore"
-        } else if (path.endsWith(".png")) {
-            path = path.substring(0, path.length() - 4);       // "block/gold_ore"
+        String withoutPrefix = path.substring("textures/".length());
+        if (withoutPrefix.endsWith(".gif")) {
+            withoutPrefix = withoutPrefix.substring(0, withoutPrefix.length() - 4);
+        } else if (withoutPrefix.endsWith(".png3")) {
+            withoutPrefix = withoutPrefix.substring(0, withoutPrefix.length() - 5);
+        } else {
+            throw new IllegalArgumentException("Animated texture must use .gif or .png3: " + sourceId);
         }
-
-        return Identifier.of(sourceId.getNamespace(), path); // "minecraft:block/gold_ore"
+        return Identifier.of(sourceId.getNamespace(), withoutPrefix);
     }
 
-    /**
-     * Returns the bare registry-name identifier for mob_effect textures.
-     * The mob_effects atlas uses prefix="" so sprite IDs are just the effect name
-     * (e.g. "minecraft:fire_resistance" instead of "minecraft:mob_effect/fire_resistance").
-     *
-     * @return the bare name identifier, or null if this is not a mob_effect texture
-     */
-    public Identifier getMobEffectTargetId() {
-        String path = sourceId.getPath();
-        if (path.startsWith("textures/")) {
-            path = path.substring("textures/".length());
+    private NativeImage renderNearest(AnimatedFrame frame, int targetWidth, int targetHeight) {
+        NativeImage image = new NativeImage(NativeImage.Format.RGBA, targetWidth, targetHeight, false);
+        int[] pixels = frame.pixelsUnsafe();
+        for (int y = 0; y < targetHeight; y++) {
+            int sourceY = (int) ((long) y * frame.getHeight() / targetHeight);
+            for (int x = 0; x < targetWidth; x++) {
+                int sourceX = (int) ((long) x * frame.getWidth() / targetWidth);
+                image.setColor(x, y, argbToAbgr(pixels[sourceY * frame.getWidth() + sourceX]));
+            }
         }
-        if (!path.startsWith("mob_effect/")) return null;
+        return image;
+    }
 
-        // Strip mob_effect/ prefix
-        path = path.substring("mob_effect/".length());
-
-        // Strip extension
-        if (path.endsWith(".gif")) {
-            path = path.substring(0, path.length() - 4);
-        } else if (path.endsWith(".png3")) {
-            path = path.substring(0, path.length() - 5);
-        } else if (path.endsWith(".png")) {
-            path = path.substring(0, path.length() - 4);
+    private NativeImage renderBilinear(AnimatedFrame frame, int targetWidth, int targetHeight) {
+        NativeImage image = new NativeImage(NativeImage.Format.RGBA, targetWidth, targetHeight, false);
+        int[] pixels = resizeBilinearArgb(frame.pixelsUnsafe(), frame.getWidth(), frame.getHeight(),
+                targetWidth, targetHeight);
+        for (int y = 0; y < targetHeight; y++) {
+            for (int x = 0; x < targetWidth; x++) {
+                image.setColor(x, y, argbToAbgr(pixels[y * targetWidth + x]));
+            }
         }
+        return image;
+    }
 
-        return Identifier.of(sourceId.getNamespace(), path); // "minecraft:fire_resistance"
+    static int[] resizeBilinearArgb(int[] pixels, int sourceWidth, int sourceHeight,
+                                    int targetWidth, int targetHeight) {
+        int[] resized = new int[targetWidth * targetHeight];
+        for (int y = 0; y < targetHeight; y++) {
+            float sourceY = ((y + 0.5f) * sourceHeight / targetHeight) - 0.5f;
+            sourceY = Math.max(0, Math.min(sourceY, sourceHeight - 1));
+            int y0 = (int) Math.floor(sourceY);
+            int y1 = Math.min(y0 + 1, sourceHeight - 1);
+            float yFraction = sourceY - y0;
+            for (int x = 0; x < targetWidth; x++) {
+                float sourceX = ((x + 0.5f) * sourceWidth / targetWidth) - 0.5f;
+                sourceX = Math.max(0, Math.min(sourceX, sourceWidth - 1));
+                int x0 = (int) Math.floor(sourceX);
+                int x1 = Math.min(x0 + 1, sourceWidth - 1);
+                float xFraction = sourceX - x0;
+                resized[y * targetWidth + x] = interpolateArgb(
+                        pixels[y0 * sourceWidth + x0], pixels[y0 * sourceWidth + x1],
+                        pixels[y1 * sourceWidth + x0], pixels[y1 * sourceWidth + x1],
+                        xFraction, yFraction);
+            }
+        }
+        return resized;
+    }
+
+    private static int interpolateArgb(int topLeft, int topRight, int bottomLeft, int bottomRight,
+                                       float xFraction, float yFraction) {
+        float topWeight = (1 - xFraction) * (1 - yFraction);
+        float topRightWeight = xFraction * (1 - yFraction);
+        float bottomLeftWeight = (1 - xFraction) * yFraction;
+        float bottomRightWeight = xFraction * yFraction;
+        int[] samples = {topLeft, topRight, bottomLeft, bottomRight};
+        float[] weights = {topWeight, topRightWeight, bottomLeftWeight, bottomRightWeight};
+        float alpha = 0;
+        float red = 0;
+        float green = 0;
+        float blue = 0;
+        for (int index = 0; index < samples.length; index++) {
+            int sampleAlpha = samples[index] >>> 24;
+            float weightedAlpha = sampleAlpha * weights[index];
+            alpha += weightedAlpha;
+            red += ((samples[index] >>> 16) & 0xFF) * weightedAlpha;
+            green += ((samples[index] >>> 8) & 0xFF) * weightedAlpha;
+            blue += (samples[index] & 0xFF) * weightedAlpha;
+        }
+        int outputAlpha = Math.round(alpha);
+        if (outputAlpha == 0 || alpha == 0) {
+            return 0;
+        }
+        int outputRed = clampChannel(Math.round(red / alpha));
+        int outputGreen = clampChannel(Math.round(green / alpha));
+        int outputBlue = clampChannel(Math.round(blue / alpha));
+        return (clampChannel(outputAlpha) << 24) | (outputRed << 16) | (outputGreen << 8) | outputBlue;
+    }
+
+    private static int clampChannel(int value) {
+        return Math.max(0, Math.min(255, value));
+    }
+
+    private static int argbToAbgr(int argb) {
+        return (argb & 0xFF00FF00) | ((argb & 0x00FF0000) >>> 16) | ((argb & 0x000000FF) << 16);
     }
 }

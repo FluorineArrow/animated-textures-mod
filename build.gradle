@@ -33,6 +33,8 @@ dependencies {
     modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
     modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
     modImplementation "com.terraformersmc:modmenu:${project.modmenu_version}"
+
+    testImplementation "org.junit.jupiter:junit-jupiter:5.10.2"
 }
 
 processResources {
@@ -46,13 +48,26 @@ tasks.withType(JavaCompile).configureEach {
     it.options.release = 21
 }
 
+tasks.withType(Test).configureEach {
+    useJUnitPlatform()
+    systemProperty "java.awt.headless", "true"
+}
+
 // Generate valid placeholder PNGs + animated GIF + animated APNG for the example pack.
 // All image generation uses Java standard libraries to ensure compatibility with
 // both stb_image (Minecraft's PNG loader) and our custom GifDecoder/ApngDecoder.
 task generateExamplePlaceholders {
+    def outputDir = layout.buildDirectory.dir('generated/example-pack')
+    inputs.file('src/exampleResourcePack/pack.mcmeta')
+    outputs.dir(outputDir)
     doLast {
-        def blockDir = file('example_pack/assets/minecraft/textures/block')
-        def itemDir  = file('example_pack/assets/minecraft/textures/item')
+        def packDir = outputDir.get().asFile
+        copy {
+            from 'src/exampleResourcePack/pack.mcmeta'
+            into packDir
+        }
+        def blockDir = new File(packDir, 'assets/minecraft/textures/block')
+        def itemDir  = new File(packDir, 'assets/minecraft/textures/item')
         blockDir.mkdirs()
         itemDir.mkdirs()
 
@@ -97,13 +112,13 @@ task generateExamplePlaceholders {
         }
 
         // --- Placeholder PNGs ---
-        png(file('example_pack/assets/minecraft/textures/block/gold_ore.png'), 255, 180, 30)
-        png(file('example_pack/assets/minecraft/textures/item/diamond.png'),   80,  200, 240)
+        png(new File(packDir, 'assets/minecraft/textures/block/gold_ore.png'), 255, 180, 30)
+        png(new File(packDir, 'assets/minecraft/textures/item/diamond.png'),   80,  200, 240)
 
         // --- Animated GIF (gold_ore) ---
         int gifFrames = 8
         def gifImages = (0..<gifFrames).collect { fi -> frameImage(220, 180, 0, fi, gifFrames) }
-        writeAnimatedGif(file('example_pack/assets/minecraft/textures/block/gold_ore.gif'), gifImages, 10)
+        writeAnimatedGif(new File(packDir, 'assets/minecraft/textures/block/gold_ore.gif'), gifImages, 10)
         println "Generated animated GIF: gold_ore.gif (${gifFrames} frames)"
 
         // --- Animated APNG (diamond) ---
@@ -124,11 +139,11 @@ task generateExamplePlaceholders {
             gfx.dispose()
             return img
         }
-        writeApng(file('example_pack/assets/minecraft/textures/item/diamond.png3'), apngImages, 1, 10)
+        writeApng(new File(packDir, 'assets/minecraft/textures/item/diamond.png3'), apngImages, 1, 10)
         println "Generated APNG: diamond.png3 (${apngFrames} frames)"
 
         // --- Mob Effect animated textures (18x18 APNGs) ---
-        def effectDir = file('example_pack/assets/minecraft/textures/mob_effect')
+        def effectDir = new File(packDir, 'assets/minecraft/textures/mob_effect')
         effectDir.mkdirs()
 
         // Generic helper: plain placeholder PNG for effects
@@ -160,8 +175,8 @@ task generateExamplePlaceholders {
             gfx.dispose()
             return img
         }
-        effectPng(file('example_pack/assets/minecraft/textures/mob_effect/speed.png'), 30, 30, 80)
-        writeApng(file('example_pack/assets/minecraft/textures/mob_effect/speed.png3'), speedImgs, 1, 10)
+        effectPng(new File(packDir, 'assets/minecraft/textures/mob_effect/speed.png'), 30, 30, 80)
+        writeApng(new File(packDir, 'assets/minecraft/textures/mob_effect/speed.png3'), speedImgs, 1, 10)
 
         // Jump Boost effect: arrow bouncing up and down
         def jumpImgs = (0..<efFrames).collect { fi ->
@@ -182,8 +197,8 @@ task generateExamplePlaceholders {
             gfx.dispose()
             return img
         }
-        effectPng(file('example_pack/assets/minecraft/textures/mob_effect/jump_boost.png'), 20, 60, 20)
-        writeApng(file('example_pack/assets/minecraft/textures/mob_effect/jump_boost.png3'), jumpImgs, 1, 10)
+        effectPng(new File(packDir, 'assets/minecraft/textures/mob_effect/jump_boost.png'), 20, 60, 20)
+        writeApng(new File(packDir, 'assets/minecraft/textures/mob_effect/jump_boost.png3'), jumpImgs, 1, 10)
 
         // Strength effect: radiating fist/power
         def strengthImgs = (0..<efFrames).collect { fi ->
@@ -215,8 +230,8 @@ task generateExamplePlaceholders {
             gfx.dispose()
             return img
         }
-        effectPng(file('example_pack/assets/minecraft/textures/mob_effect/strength.png'), 60, 30, 10)
-        writeApng(file('example_pack/assets/minecraft/textures/mob_effect/strength.png3'), strengthImgs, 1, 10)
+        effectPng(new File(packDir, 'assets/minecraft/textures/mob_effect/strength.png'), 60, 30, 10)
+        writeApng(new File(packDir, 'assets/minecraft/textures/mob_effect/strength.png3'), strengthImgs, 1, 10)
 
         // Fire Resistance effect: flame/fire animation
         def fireImgs = (0..<efFrames).collect { fi ->
@@ -259,8 +274,8 @@ task generateExamplePlaceholders {
             gfx.dispose()
             return img
         }
-        effectPng(file('example_pack/assets/minecraft/textures/mob_effect/fire_resistance.png'), 50, 15, 5)
-        writeApng(file('example_pack/assets/minecraft/textures/mob_effect/fire_resistance.png3'), fireImgs, 1, 10)
+        effectPng(new File(packDir, 'assets/minecraft/textures/mob_effect/fire_resistance.png'), 50, 15, 5)
+        writeApng(new File(packDir, 'assets/minecraft/textures/mob_effect/fire_resistance.png3'), fireImgs, 1, 10)
         println "Generated 4 animated effect textures (speed, jump_boost, strength, fire_resistance)"
     }
 }
@@ -344,10 +359,12 @@ void writeApng(File outFile, java.util.List<java.awt.image.BufferedImage> frames
     actl.write([0, 0, 0, 0] as byte[]) // num_plays=0 (infinite)
     bytes.write(chunk('acTL'.bytes, actl.toByteArray()))
 
+    int sequence = 0
     frames.eachWithIndex { img, fi ->
         // fcTL
         def fctl = new java.io.ByteArrayOutputStream()
-        fctl.write([(fi >> 24) & 0xFF, (fi >> 16) & 0xFF, (fi >> 8) & 0xFF, fi & 0xFF] as byte[]) // seq
+        fctl.write([(sequence >> 24) & 0xFF, (sequence >> 16) & 0xFF, (sequence >> 8) & 0xFF, sequence & 0xFF] as byte[])
+        sequence++
         fctl.write([(w >> 24) & 0xFF, (w >> 16) & 0xFF, (w >> 8) & 0xFF, w & 0xFF] as byte[])
         fctl.write([(h >> 24) & 0xFF, (h >> 16) & 0xFF, (h >> 8) & 0xFF, h & 0xFF] as byte[])
         fctl.write([0, 0, 0, 0] as byte[]) // x/y offset = 0
@@ -381,7 +398,8 @@ void writeApng(File outFile, java.util.List<java.awt.image.BufferedImage> frames
             bytes.write(chunk('IDAT'.bytes, compressed.toByteArray()))
         } else {
             def fdat = new java.io.ByteArrayOutputStream()
-            fdat.write([(fi >> 24) & 0xFF, (fi >> 16) & 0xFF, (fi >> 8) & 0xFF, fi & 0xFF] as byte[]) // seq
+            fdat.write([(sequence >> 24) & 0xFF, (sequence >> 16) & 0xFF, (sequence >> 8) & 0xFF, sequence & 0xFF] as byte[])
+            sequence++
             fdat.write(compressed.toByteArray())
             bytes.write(chunk('fdAT'.bytes, fdat.toByteArray()))
         }
@@ -393,7 +411,89 @@ void writeApng(File outFile, java.util.List<java.awt.image.BufferedImage> frames
     outFile.bytes = bytes.toByteArray()
 }
 
-processResources.dependsOn generateExamplePlaceholders
+tasks.register('packageExampleResourcePack', Zip) {
+    dependsOn generateExamplePlaceholders
+    from(layout.buildDirectory.dir('generated/example-pack'))
+    archiveFileName.set("${project.archives_base_name}-example-pack-${project.version}.zip")
+    destinationDirectory.set(layout.buildDirectory.dir('libs'))
+}
+
+tasks.register('verifyExampleResourcePack') {
+    dependsOn tasks.named('packageExampleResourcePack')
+    doLast {
+        def packDir = layout.buildDirectory.dir('generated/example-pack').get().asFile
+        def requiredFiles = [
+                'pack.mcmeta',
+                'assets/minecraft/textures/block/gold_ore.png',
+                'assets/minecraft/textures/block/gold_ore.gif',
+                'assets/minecraft/textures/item/diamond.png',
+                'assets/minecraft/textures/item/diamond.png3'
+        ]
+        requiredFiles.each { path ->
+            if (!new File(packDir, path).isFile()) {
+                throw new GradleException("Example resource pack is missing ${path}")
+            }
+        }
+        if (!new File(packDir, 'pack.mcmeta').getText('UTF-8').contains('"pack_format": 34')) {
+            throw new GradleException('Example resource pack uses an unexpected pack format')
+        }
+        byte[] gif = new File(packDir, 'assets/minecraft/textures/block/gold_ore.gif').bytes
+        if (gif.length < 6 || new String(gif, 0, 6, 'US-ASCII') !in ['GIF87a', 'GIF89a']) {
+            throw new GradleException('Example GIF has an invalid signature')
+        }
+        byte[] apng = new File(packDir, 'assets/minecraft/textures/item/diamond.png3').bytes
+        byte[] signature = [(byte) 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A] as byte[]
+        if (apng.length < signature.length || !java.util.Arrays.equals(signature, java.util.Arrays.copyOf(apng, signature.length))) {
+            throw new GradleException('Example APNG has an invalid PNG signature')
+        }
+        int offset = signature.length
+        int expectedSequence = 0
+        boolean sawAnimationControl = false
+        boolean sawIend = false
+        while (offset < apng.length) {
+            if (apng.length - offset < 12) {
+                throw new GradleException('Example APNG has a truncated chunk')
+            }
+            int length = ((apng[offset] & 0xFF) << 24) | ((apng[offset + 1] & 0xFF) << 16) | ((apng[offset + 2] & 0xFF) << 8) | (apng[offset + 3] & 0xFF)
+            offset += 4
+            String type = new String(apng, offset, 4, 'US-ASCII')
+            offset += 4
+            if (length < 0 || length > apng.length - offset - 4) {
+                throw new GradleException("Example APNG has an invalid ${type} length")
+            }
+            if (type in ['fcTL', 'fdAT']) {
+                if (length < 4) {
+                    throw new GradleException("Example APNG ${type} lacks a sequence number")
+                }
+                int sequenceNumber = ((apng[offset] & 0xFF) << 24) | ((apng[offset + 1] & 0xFF) << 16) | ((apng[offset + 2] & 0xFF) << 8) | (apng[offset + 3] & 0xFF)
+                if (sequenceNumber != expectedSequence++) {
+                    throw new GradleException("Example APNG ${type} sequence is not monotonic")
+                }
+                sawAnimationControl = true
+            }
+            if (type == 'IEND') {
+                sawIend = true
+            }
+            offset += length + 4
+        }
+        if (!sawAnimationControl || !sawIend) {
+            throw new GradleException('Example APNG is incomplete')
+        }
+        def archive = tasks.named('packageExampleResourcePack', Zip).get().archiveFile.get().asFile
+        def zip = new java.util.zip.ZipFile(archive)
+        try {
+            if (zip.getEntry('pack.mcmeta') == null) {
+                throw new GradleException('Example resource-pack ZIP has no root pack.mcmeta')
+            }
+        } finally {
+            zip.close()
+        }
+    }
+}
+
+tasks.named('check') {
+    dependsOn tasks.named('verifyExampleResourcePack')
+}
 
 java {
     withSourcesJar()

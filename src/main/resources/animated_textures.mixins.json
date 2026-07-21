@@ -3,9 +3,8 @@
   "package": "com.animatedtextures.mixin",
   "compatibilityLevel": "JAVA_21",
   "client": [
-    "SpriteContentsAnimationMixin",
-    "SpriteAtlasTextureMixin",
-    "TextureManagerMixin"
+    "ReloadableResourceManagerMixin",
+    "SpriteAtlasTextureMixin"
   ],
   "injectors": {
     "defaultRequire": 1

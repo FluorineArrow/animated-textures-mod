@@ -40,7 +40,7 @@
 |------|----------|---------------------|
 | **GIF 支持** | 支持标准 GIF89a 格式动画，含多帧、透明度、帧间延迟 | Full GIF89a support with multi-frame, transparency, inter-frame delay |
 | **APNG 支持** | 支持 `.png3` 扩展名的 APNG（动画 PNG）格式 | APNG (Animated PNG) via `.png3` extension |
-| **任意分辨率** | 支持 16×16、32×32、64×64 等任意分辨率纹理 | Any resolution textures (16×16, 32×32, 64×64, etc.) |
+| **Bounded resolution** | 支持 16×16、32×32、64×64 等纹理，单边最多 2,048 像素 | Supports textures up to 2,048 pixels per side |
 | **多图集支持** | 方块、物品、药水效果图标均可使用动画纹理 | Works with block, item, and mob effect atlases |
 | **双线性缩放** | 可选双线性插值上采样，高分辨率资源包更平滑 | Optional bilinear upscaling for smooth high-res textures |
 | **Sodium 兼容** | 兼容 Sodium 渲染优化模组 | Compatible with Sodium rendering optimization mod |
@@ -80,19 +80,17 @@
 
 #### 1. 资源发现与解码 / Resource Discovery & Decoding
 
-Minecraft 的 `ResourceManager` 不会索引 `.gif` 和 `.png3` 这类非标准扩展名的文件。
-本模组采用三步策略发现动画纹理：
-
-Minecraft's `ResourceManager` does not index non-standard extensions like `.gif` or `.png3`.
-This mod uses a three-step discovery strategy:
+Minecraft resource loading is the source of truth for animations. The mod finds visible `.png` fallbacks under `textures/`, then resolves same-name `.gif` and `.png3` resources through `ResourceManager`.
 
 ```
-步骤 1: findResources("textures", *.png) → 获取所有 .png 纹理路径
-步骤 2: 对每个路径尝试打开同名的 .gif 和 .png3
-步骤 3: 独立扫描 .gif/.png3 文件（捕获无对应 .png 的动画纹理）
+Step 1: find visible textures/*.png fallbacks
+Step 2: inspect visible same-name GIF and APNG resource layers
+Step 3: select one animation before decoding
 ```
 
-对于无法通过 `ResourceManager.getResource()` 访问的文件，模组会**直接从资源包** (`ResourcePack.open()`) 读取，绕过 Minecraft 的资源索引限制。
+Animations without a visible same-name PNG fallback are ignored. Resource filters are honored. The highest-priority visible pack wins; if one winning pack supplies both formats, `.png3` APNG takes precedence over `.gif`. A corrupt selected animation falls back to its static PNG rather than loading a lower-priority animation.
+
+Decoder limits are enforced before pixel buffers are allocated: 16 MiB encoded input, 2,048 pixels per side, 4,194,304 pixels per frame/canvas, 256 frames, and 16,777,216 retained decoded pixels per animation.
 
 #### 2. GIF 解码 / GIF Decoding (`GifDecoder`)
 
@@ -105,7 +103,7 @@ Pure Java GIF89a decoder supporting:
 - **透明度**：支持透明色索引
 - **帧处置模式**：`DISPOSE_OP_BACKGROUND`（清除区域）和 `DISPOSE_OP_PREVIOUS`（恢复上一帧）
 - **隔行扫描**：支持 GIF 的 interlace 扫描模式
-- **大小限制**：最大 50 MB，防止 OOM
+- **大小限制**：最大 16 MiB，防止 OOM
 
 ```
 GIF 文件 → 读取头部 → 解析扩展块 → LZW 解码像素 → 合成帧 → AnimatedFrame 列表
@@ -127,67 +125,17 @@ APNG 文件 → 验证 PNG 签名 → 解析 IHDR/acTL/fcTL/fdAT 块
 - `blendOp`: SOURCE（覆盖）/ OVER（Alpha 混合）
 - `disposeOp`: NONE / BACKGROUND（清除）/ PREVIOUS（恢复）
 
-#### 4. 纹理图集注入 / Texture Atlas Injection
+#### 4. Atlas Animation Uploads
 
-本模组通过 **Mixin** 机制在两个层面注入动画帧：
+`SpriteAtlasTextureMixin` captures each atlas stitch result, including the stitched sprite map and mip level. The tick manager binds every matched sprite to its actual atlas and uploads an initial frame, then uploads again only when that animation frame changes.
 
-This mod injects animation frames at **two levels** via Mixin:
+Every generated frame refreshes all atlas mip levels. This avoids distant textures sampling stale static PNG pixels. GUI sprites under `textures/gui/sprites/...` and mob-effect textures use their atlas-specific bare-ID aliases; standard texture-relative IDs work in other stitched vanilla atlases.
 
-**路径 A：`SpriteContentsAnimationMixin`（Mixin 路径）**
+#### 5. Frame Scaling
 
-拦截 `SpriteContents.upload()` 方法。当 Minecraft 上传精灵帧到图集时，模组**替换精灵的像素数据**为当前动画帧，然后让 Minecraft 原生代码完成图集上传。
+动画纹理会缩放到精灵在图集中的分配区域。单个解码帧的宽高最多为 2,048 像素。
 
-```
-Minecraft 调用 SpriteContents.upload()
-  → Mixin 拦截 @HEAD
-  → 查找 AnimatedTextureRegistry 中是否有匹配的动画纹理
-  → 有 → 获取当前帧并缩放到精灵尺寸 → 替换 uploadImages[0] 的像素
-  → 标记为 mixinHandled（防止 TickManager 重复上传）
-  → Minecraft 原生代码将修改后的精灵上传到图集
-```
-
-**路径 B：`AnimatedTextureTickManager`（Tick 驱动路径）**
-
-每客户端 Tick（~50ms）运行，直接将动画帧上传到 GPU 纹理：
-
-```
-ClientTickEvents.END_CLIENT_TICK
-  → 推进所有 AnimatedTexture 的帧指针（tick()）
-  → 遍历已注册精灵（trackedSprites）
-  → 跳过已被 Mixin 处理的精灵（避免双上传）
-  → 获取当前帧 → 缩放到精灵尺寸 → 直接上传到图集 GPU 纹理
-```
-
-**双路径协同**：Mixin 路径处理 Minecraft 主动调用 upload 的场景，Tick 路径处理没有 mcmeta 动画定义的精灵。两者通过 `mixinHandledSprites` 集合协调，确保每帧只上传一次。
-
-#### 5. 图集扫描与精灵匹配 / Atlas Scanning & Sprite Matching
-
-`SpriteAtlasTextureMixin` 拦截图集上传完成事件，延迟扫描匹配精灵：
-
-```
-图集上传完成 (SpriteAtlasTexture.upload)
-  → scheduleAtlasScan(atlas)  // 保存图集引用
-  → onRegistryReady()         // 注册表就绪后扫描
-    → 对每个已注册动画纹理:
-      → getTargetTextureId()  // "minecraft:block/gold_ore"
-      → 尝试从图集获取精灵
-      → 失败则尝试 getMobEffectTargetId()  // "minecraft:fire_resistance"
-      → 匹配成功 → registerSprite() → 加入跟踪列表
-```
-
-**Identifier 转换规则 / Identifier Mapping**：
-
-| 资源包路径 (Source) | 图集精灵 ID (Target) | 说明 |
-|---------------------|----------------------|------|
-| `textures/block/gold_ore.gif` | `minecraft:block/gold_ore` | 去除 `textures/` 前缀和扩展名 |
-| `textures/mob_effect/speed.png3` | `minecraft:mob_effect/speed` | 标准路径映射 |
-| `textures/mob_effect/speed.png3` | `minecraft:speed` | 药水效果图集别名（prefix=""） |
-
-#### 6. 帧缩放 / Frame Scaling
-
-动画纹理可以是任意分辨率，模组会自动缩放到精灵在图集中的分配区域：
-
-Animated textures can be any resolution; the mod auto-scales to the sprite's allocated atlas region:
+Animated textures are scaled to the sprite's allocated atlas region. Decoded frames are limited to 2,048 pixels on either side.
 
 | 模式 | 算法 | 适用场景 |
 |------|------|----------|
@@ -207,22 +155,22 @@ Animated textures can be any resolution; the mod auto-scales to the sprite's all
 ```
 src/main/java/com/animatedtextures/
 ├── client/
-│   ├── AnimatedTexturesClient.java         # 客户端入口，注册资源重载监听器
-│   ├── AnimatedTexturesConfig.java         # 配置管理（JSON 持久化）
-│   ├── AnimatedTexturesModMenu.java        # ModMenu 配置界面
-│   └── AnimatedTextureReloadListener.java  # 资源重载：发现、解码、注册动画纹理
+│   ├── AnimatedTexturesClient.java         # Client entry point and tick registration
+│   ├── AnimatedTexturesConfig.java         # Scaling-mode JSON configuration
+│   ├── AnimatedTexturesModMenu.java        # ModMenu configuration screen
+│   ├── AnimatedTextureReloadListener.java  # Visible-resource discovery and decoding
+│   └── AnimatedResourceResolver.java       # Pack-priority and format selection
 ├── mixin/
-│   ├── SpriteContentsAnimationMixin.java   # 拦截精灵上传，替换为动画帧
-│   ├── SpriteAtlasTextureMixin.java        # 拦截图集上传完成，触发延迟扫描
-│   ├── TextureManagerMixin.java            # 纹理管理器钩子，确保 TickManager 启动
-│   └── AtlasSizeMixin.java                 # 占位：图集大小覆盖（待实现）
+│   ├── ReloadableResourceManagerMixin.java   # Owns overall reload attempts
+│   └── SpriteAtlasTextureMixin.java          # Captures stitched atlas regions
 └── util/
-    ├── AnimatedTexture.java                # 单个动画纹理：帧管理、缩放、ID 转换
-    ├── AnimatedTextureRegistry.java        # 中央注册表（ConcurrentHashMap）
-    ├── AnimatedTextureTickManager.java     # Tick 驱动的帧推进与 GPU 上传
-    ├── AnimatedFrame.java                  # 单帧数据（像素数组 + 持续时间）
-    ├── GifDecoder.java                     # 纯 Java GIF89a 解码器
-    └── ApngDecoder.java                    # 纯 Java APNG 解码器
+    ├── AnimatedImageLimits.java            # Decoder input/frame safety limits
+    ├── AnimatedTexture.java                # Frame timing, scaling, and sprite IDs
+    ├── AnimatedTextureRegistry.java        # Canonical selected animations
+    ├── AnimatedTextureTickManager.java     # Atlas-aware GPU uploads and mipmaps
+    ├── AnimatedFrame.java                  # Immutable ARGB frame data
+    ├── GifDecoder.java                     # Bounded GIF89a decoder
+    └── ApngDecoder.java                    # Bounded strict APNG decoder
 ```
 
 ---
@@ -238,8 +186,8 @@ src/main/java/com/animatedtextures/
    - Java 21+
 
 2. **安装模组 / Install mod**：
-   将 `animated-textures-1.1.0.jar` 放入 `.minecraft/mods/` 目录。
-   Place `animated-textures-1.1.0.jar` into `.minecraft/mods/` directory.
+   将 `animated-textures-1.2.0.jar` 放入 `.minecraft/mods/` 目录。
+   Place `animated-textures-1.2.0.jar` into `.minecraft/mods/` directory.
 
 ### 基本使用 / Basic Usage
 
@@ -318,23 +266,17 @@ Mob effect icons use a separate atlas at **18×18** pixels. The mod handles the 
 
 配置文件位于 `.minecraft/config/animated_textures.json`，也可通过 ModMenu 在游戏内修改。
 
-Config file: `.minecraft/config/animated_textures.json`. Also adjustable in-game via ModMenu.
+Config file: `.minecraft/config/animated_textures.json`. ModMenu edits a draft and writes it only through **Save & Done**. A `null`, malformed, or missing scaling value falls back to `BILINEAR`; legacy keys are ignored.
 
-| 参数 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `scalingMode` | Enum | `BILINEAR` | 缩放模式：`NEAREST`（最近邻）/ `BILINEAR`（双线性） |
-| `enableMipmaps` | Boolean | `true` | 是否为动画纹理生成 Mipmap |
-| `atlasSize` | Integer | `0` | 图集大小覆盖。0 = Minecraft 默认值 |
-| `logLevel` | Enum | `WARN` | 日志级别：`NONE` / `WARN` / `INFO` / `DEBUG` |
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `scalingMode` | Enum | `BILINEAR` | `NEAREST` for pixel-preserving sampling or `BILINEAR` for smooth upscaling |
 
-**配置文件示例 / Example config**：
+All atlas mip levels are updated automatically whenever an animation frame changes.
 
 ```json
 {
-  "scalingMode": "BILINEAR",
-  "enableMipmaps": true,
-  "atlasSize": 0,
-  "logLevel": "WARN"
+  "scalingMode": "BILINEAR"
 }
 ```
 
@@ -353,17 +295,21 @@ Config file: `.minecraft/config/animated_textures.json`. Also adjustable in-game
 # 编译 / Compile
 ./gradlew build
 
-# 生成示例资源包素材 / Generate example pack assets
-./gradlew generateExamplePlaceholders
+# Generate and validate the example resource-pack ZIP
+./gradlew verifyExampleResourcePack
 
-# 在开发环境中运行 Minecraft / Run Minecraft in dev
+# Run decoder and state regressions
+./gradlew test
+
+# Run Minecraft in the development environment
 ./gradlew runClient
 ```
 
 ### 输出文件 / Output
 
-- 构建产物：`build/libs/animated-textures-1.1.0.jar`
-- 示例资源包：`example_pack/`（由 Gradle task 自动生成）
+- Mod artifact: `build/libs/animated-textures-1.2.0.jar`
+- Installable example pack: `build/libs/animated-textures-example-pack-1.2.0.zip`
+- Generated staging directory: `build/generated/example-pack/`
 
 ---
 
@@ -371,17 +317,19 @@ Config file: `.minecraft/config/animated_textures.json`. Also adjustable in-game
 
 | 模组/环境 | 兼容性 | 备注 |
 |-----------|--------|------|
-| **Sodium** | ✅ 兼容 | Mixin 优先级 1001，确保在 Sodium 之后执行 |
-| **Iris** | ✅ 兼容 | 不影响着色器管线 |
-| **OptiFine** | ⚠️ 未测试 | 与 Sodium 存在已知冲突时可能有问题 |
+| **Sodium** | ✅ 已验证兼容 | Minecraft 1.21 客户端已验证 Atlas 动画与资源重载 |
+| **Iris** | ⚠️ Client validation pending | Requires the same atlas regression pass |
+| **OptiFine** | ⚠️ Untested | May conflict with Fabric renderer assumptions |
 | **ModMenu** | ✅ 已集成 | 通过 ModMenu 提供配置界面 |
 | **服务器** | ✅ 纯客户端 | `environment: "client"`，无需服务端安装 |
 
 ### Sodium 兼容细节 / Sodium Compatibility Details
 
+- Minecraft 1.21 客户端已确认与 Sodium 兼容，包括动画 Atlas 上传和资源重载
 - `SpriteAtlasTextureMixin` 使用 `priority = 1001`，确保在 Sodium 的 `MixinSpriteAtlasTexture`（默认 1000）之后执行
-- 动画纹理通过直接 GPU 上传绕过 Sodium 的 "Animate Only Visible Textures" 可见性跟踪
-- 即使 Sodium 优化了不可见纹理的动画，本模组的纹理仍会持续动画
+- 动画纹理通过直接 GPU 上传维护所有 mip 层，不依赖 Sodium 的原版动画可见性跟踪
+
+Sodium compatibility has been validated on the Minecraft 1.21 client path. Iris remains pending separate validation.
 
 ---
 
@@ -417,18 +365,14 @@ A: Yes. Simply place files under `assets/<your_namespace>/textures/`.
 **Q: 可以同时使用多个资源包的动画纹理吗？**
 **Q: Can I use animated textures from multiple resource packs?**
 
-A: 可以。Minecraft 的资源包优先级系统决定了同名纹理的覆盖顺序，高优先级包的动画纹理会覆盖低优先级的。
-
-A: Yes. Minecraft's resource pack priority system determines which animated texture wins when multiple packs define the same texture.
+A: Yes. Minecraft resource filters are honored. For a target with multiple visible animations, the highest-priority pack wins; if that pack has both formats, `.png3` APNG wins over `.gif`. The chosen animation is not replaced by a lower-priority file if decoding fails.
 
 ---
 
 **Q: `.png3` 是什么？为什么不直接用 `.apng`？**
 **Q: What is `.png3`? Why not use `.apng`?**
 
-A: Minecraft 的资源管理器 (`ResourceManager`) 只索引已知扩展名（如 `.png`、`.json`）。使用 `.png3` 这种变体扩展名是折中方案：既避免与原版 `.png` 冲突，又可以通过资源包直接访问读取。
-
-A: Minecraft's `ResourceManager` only indexes known extensions (like `.png`, `.json`). Using `.png3` is a compromise: it avoids conflict with vanilla `.png` while still being directly accessible from resource packs.
+A: `.png3` keeps APNG assets distinct from Minecraft's static `.png` fallback while remaining addressable as a resource. A same-name `.png` fallback is required for every animation.
 
 ---
 

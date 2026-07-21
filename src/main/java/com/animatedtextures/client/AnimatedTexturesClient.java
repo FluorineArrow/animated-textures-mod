@@ -1,6 +1,6 @@
 package com.animatedtextures.client;
 
-import com.animatedtextures.util.AnimatedTextureRegistry;
+import com.animatedtextures.util.AnimatedTextureTickManager;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.resource.ResourceManagerHelper;
 import net.minecraft.resource.ResourceType;
@@ -20,6 +20,7 @@ public class AnimatedTexturesClient implements ClientModInitializer {
         // for .png3 (APNG) and .gif files on every resource reload
         ResourceManagerHelper.get(ResourceType.CLIENT_RESOURCES)
                 .registerReloadListener(new AnimatedTextureReloadListener());
+        AnimatedTextureTickManager.register();
 
         LOGGER.info("[AnimatedTextures] Ready! Place .png3 or .gif files in your resource pack's textures folder.");
     }
