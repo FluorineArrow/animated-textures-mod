@@ -9,6 +9,9 @@ public final class AnimatedTextureReloadBudget {
     public static final int DEFAULT_MAX_FRAMES = 1_024;
     public static final long DEFAULT_MAX_RETAINED_PIXELS = 16_777_216L;
     public static final long DEFAULT_MAX_ESTIMATED_BYTES = DEFAULT_MAX_RETAINED_PIXELS * Integer.BYTES;
+    public static final long HIGH_RESOLUTION_MAX_RETAINED_PIXELS = 33_554_432L;
+    public static final long HIGH_RESOLUTION_MAX_ESTIMATED_BYTES =
+            HIGH_RESOLUTION_MAX_RETAINED_PIXELS * Integer.BYTES;
 
     private final int maxAnimations;
     private final int maxFrames;

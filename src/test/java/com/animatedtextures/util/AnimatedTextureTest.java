@@ -23,6 +23,37 @@ class AnimatedTextureTest {
     }
 
     @Test
+    void standardQualityKeepsTheTwentyFpsCompatibilityFloor() {
+        AnimatedTexture texture = textureWithDurations(10, 10);
+
+        assertFalse(texture.tick(49));
+        assertTrue(texture.tick(1));
+    }
+
+    @Test
+    void highFrameRateQualityPreservesSourceTiming() {
+        AnimatedTexture texture = new AnimatedTexture(
+                Identifier.of("minecraft", "textures/block/example.gif"),
+                new DecodedAnimation(textureFrames(10, 10), DecodedAnimation.INFINITE_PLAYS),
+                AnimationQuality.HIGH_FRAME_RATE);
+
+        assertFalse(texture.tick(9));
+        assertTrue(texture.tick(1));
+        assertEquals(1, texture.getCurrentFrameIndex());
+    }
+
+    @Test
+    void completeCycleReturningToSameFrameCanSkipUpload() {
+        AnimatedTexture texture = new AnimatedTexture(
+                Identifier.of("minecraft", "textures/block/example.gif"),
+                new DecodedAnimation(textureFrames(10, 10), DecodedAnimation.INFINITE_PLAYS),
+                AnimationQuality.HIGH_FRAME_RATE);
+
+        assertTrue(texture.tick(20));
+        assertEquals(0, texture.getCurrentFrameIndex());
+    }
+
+    @Test
     void catchesUpAcrossFramesAndPreservesRemainder() {
         AnimatedTexture texture = textureWithDurations(50, 70, 90);
 

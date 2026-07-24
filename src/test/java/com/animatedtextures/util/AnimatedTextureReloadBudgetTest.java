@@ -33,6 +33,14 @@ class AnimatedTextureReloadBudgetTest {
         assertEquals(0, budget.retainedPixels());
     }
 
+    @Test
+    void qualityCreatesTheMatchingReloadBudget() {
+        assertEquals(AnimatedTextureReloadBudget.DEFAULT_MAX_RETAINED_PIXELS,
+                AnimationQuality.STANDARD.newReloadBudget().remaining().retainedPixels());
+        assertEquals(AnimatedTextureReloadBudget.HIGH_RESOLUTION_MAX_RETAINED_PIXELS,
+                AnimationQuality.HIGH_RESOLUTION.newReloadBudget().remaining().retainedPixels());
+    }
+
     private static DecodedAnimation animation(int frames) {
         java.util.ArrayList<AnimatedFrame> result = new java.util.ArrayList<>();
         for (int index = 0; index < frames; index++) {

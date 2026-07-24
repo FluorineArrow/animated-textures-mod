@@ -5,33 +5,41 @@ package com.animatedtextures.util;
  */
 final class UploadRetryPolicy {
 
-    private final long maximumDelayTicks;
+    private final long initialDelay;
+    private final long maximumDelay;
     private int failures;
-    private long nextAttemptTick;
+    private long nextAttempt;
 
-    UploadRetryPolicy(long maximumDelayTicks) {
-        if (maximumDelayTicks < 1 || maximumDelayTicks >= Long.MAX_VALUE / 2) {
+    UploadRetryPolicy(long maximumDelay) {
+        this(1, maximumDelay);
+    }
+
+    UploadRetryPolicy(long initialDelay, long maximumDelay) {
+        if (initialDelay < 1 || maximumDelay < initialDelay || maximumDelay >= Long.MAX_VALUE / 2) {
             throw new IllegalArgumentException("Maximum retry delay is out of range");
         }
-        this.maximumDelayTicks = maximumDelayTicks;
+        this.initialDelay = initialDelay;
+        this.maximumDelay = maximumDelay;
     }
 
-    boolean isDue(long tick) {
-        return failures == 0 || tick - nextAttemptTick >= 0;
+    boolean isDue(long now) {
+        return failures == 0 || now - nextAttempt >= 0;
     }
 
-    long recordFailure(long tick) {
+    long recordFailure(long now) {
         failures = Math.min(failures + 1, 63);
-        long delay = failures >= 63 ? maximumDelayTicks
-                : Math.min(maximumDelayTicks, 1L << (failures - 1));
-        nextAttemptTick = tick + delay;
+        int shift = failures - 1;
+        long delay = shift >= 63 || initialDelay > maximumDelay >> shift
+                ? maximumDelay
+                : Math.min(maximumDelay, initialDelay << shift);
+        nextAttempt = now + delay;
         return delay;
     }
 
     int recordSuccess() {
         int recoveredFailures = failures;
         failures = 0;
-        nextAttemptTick = 0;
+        nextAttempt = 0;
         return recoveredFailures;
     }
 

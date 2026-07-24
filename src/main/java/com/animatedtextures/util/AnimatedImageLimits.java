@@ -15,6 +15,15 @@ final class AnimatedImageLimits {
             64 * 1024
     );
 
+    static final AnimatedImageLimits HIGH_RESOLUTION = new AnimatedImageLimits(
+            32 * 1024 * 1024,
+            4_096,
+            16_777_216,
+            256,
+            33_554_432,
+            64 * 1024
+    );
+
     final int maxEncodedBytes;
     final int maxDimension;
     final int maxFramePixels;

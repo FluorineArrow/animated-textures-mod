@@ -55,4 +55,17 @@ class UploadRetryPolicyTest {
         assertFalse(policy.isDue(Long.MAX_VALUE));
         assertTrue(policy.isDue(Long.MIN_VALUE));
     }
+
+    @Test
+    void supportsNanosecondScaleInitialAndMaximumDelays() {
+        UploadRetryPolicy policy = new UploadRetryPolicy(50_000_000L, 5_000_000_000L);
+
+        assertEquals(50_000_000L, policy.recordFailure(1_000_000_000L));
+        assertFalse(policy.isDue(1_049_999_999L));
+        assertTrue(policy.isDue(1_050_000_000L));
+        for (int failure = 0; failure < 20; failure++) {
+            policy.recordFailure(10_000_000_000L);
+        }
+        assertEquals(5_000_000_000L, policy.recordFailure(20_000_000_000L));
+    }
 }

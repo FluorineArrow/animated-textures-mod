@@ -18,12 +18,18 @@ class AnimatedFrameTest {
         exposed[0] = 0;
 
         assertArrayEquals(new int[]{0xFF112233}, frame.getPixels());
-        assertEquals(50, frame.getDurationMs());
+        assertEquals(10, frame.getDurationMs());
     }
 
     @Test
     void rejectsInconsistentPixelDimensions() {
         assertThrows(IllegalArgumentException.class, () -> new AnimatedFrame(new int[1], 2, 2, 50));
         assertThrows(IllegalArgumentException.class, () -> new AnimatedFrame(new int[0], 0, 1, 50));
+    }
+
+    @Test
+    void keepsPositiveSourceTimingAndNormalizesZeroDelay() {
+        assertEquals(10, new AnimatedFrame(new int[1], 1, 1, 10).getDurationMs());
+        assertEquals(1, new AnimatedFrame(new int[1], 1, 1, 0).getDurationMs());
     }
 }

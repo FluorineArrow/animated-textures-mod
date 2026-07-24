@@ -1,5 +1,6 @@
 package com.animatedtextures.client;
 
+import com.animatedtextures.util.AnimationQuality;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import net.fabricmc.loader.api.FabricLoader;
@@ -18,6 +19,7 @@ public final class AnimatedTexturesConfig {
 
     /** Scaling algorithm for generated animation frames. */
     public ScalingMode scalingMode = ScalingMode.BILINEAR;
+    public AnimationQuality quality = AnimationQuality.STANDARD;
 
     public enum ScalingMode {
         NEAREST("Nearest Neighbor (Fast)"),
@@ -61,12 +63,16 @@ public final class AnimatedTexturesConfig {
         if (config.scalingMode == null) {
             config.scalingMode = ScalingMode.BILINEAR;
         }
+        if (config.quality == null) {
+            config.quality = AnimationQuality.STANDARD;
+        }
         return config;
     }
 
     public AnimatedTexturesConfig copy() {
         AnimatedTexturesConfig copy = new AnimatedTexturesConfig();
         copy.scalingMode = scalingMode;
+        copy.quality = quality;
         return copy;
     }
 

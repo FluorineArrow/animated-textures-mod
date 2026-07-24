@@ -1,6 +1,7 @@
 package com.animatedtextures.client;
 
 import com.animatedtextures.util.AnimatedTexture;
+import com.animatedtextures.util.AnimationQuality;
 import com.animatedtextures.util.AnimatedTextureRegistryBuilder;
 import com.animatedtextures.util.AnimatedTextureRegistrySnapshot;
 import com.animatedtextures.util.AnimatedTextureReloadAttempt;
@@ -36,7 +37,8 @@ public final class AnimatedTextureReloadListener implements SimpleSynchronousRes
 
     private void reloadTransactional(ResourceManager manager, AnimatedTextureReloadAttempt attempt) {
         List<AnimatedResourceResolver.SelectedResource> selections = AnimatedResourceResolver.resolve(manager);
-        AnimatedTextureRegistryBuilder builder = new AnimatedTextureRegistryBuilder();
+        AnimationQuality quality = AnimatedTexturesConfig.get().quality;
+        AnimatedTextureRegistryBuilder builder = new AnimatedTextureRegistryBuilder(quality);
         int loaded = 0;
         for (AnimatedResourceResolver.SelectedResource selection : selections) {
             if (!builder.remaining().canDecode()) {
@@ -48,10 +50,10 @@ public final class AnimatedTextureReloadListener implements SimpleSynchronousRes
             try (InputStream input = selection.resource().getInputStream()) {
                 var remaining = builder.remaining();
                 DecodedAnimation animation = switch (selection.format()) {
-                    case GIF -> new GifDecoder(remaining).decodeAnimation(input);
-                    case APNG -> new ApngDecoder(remaining).decodeAnimation(input);
+                    case GIF -> new GifDecoder(quality, remaining).decodeAnimation(input);
+                    case APNG -> new ApngDecoder(quality, remaining).decodeAnimation(input);
                 };
-                AnimatedTexture texture = new AnimatedTexture(selection.sourceId(), animation);
+                AnimatedTexture texture = new AnimatedTexture(selection.sourceId(), animation, quality);
                 if (builder.tryAdd(texture)) {
                     loaded++;
                     AnimatedTexturesClient.LOGGER.info(

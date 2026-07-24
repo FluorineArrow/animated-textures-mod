@@ -20,6 +20,7 @@ public final class AnimatedTexture {
     private final Identifier targetTextureId;
     private final long cycleDurationMs;
     private final long totalPlays;
+    private final AnimationQuality quality;
 
     private int currentFrameIndex;
     private long elapsedInFrameMs;
@@ -28,12 +29,17 @@ public final class AnimatedTexture {
     private boolean finished;
 
     public AnimatedTexture(Identifier sourceId, List<AnimatedFrame> frames) {
-        this(sourceId, new DecodedAnimation(frames, DecodedAnimation.INFINITE_PLAYS));
+        this(sourceId, new DecodedAnimation(frames, DecodedAnimation.INFINITE_PLAYS), AnimationQuality.STANDARD);
     }
 
     public AnimatedTexture(Identifier sourceId, DecodedAnimation animation) {
+        this(sourceId, animation, AnimationQuality.STANDARD);
+    }
+
+    public AnimatedTexture(Identifier sourceId, DecodedAnimation animation, AnimationQuality quality) {
         this.sourceId = Objects.requireNonNull(sourceId, "sourceId");
         Objects.requireNonNull(animation, "animation");
+        this.quality = Objects.requireNonNull(quality, "quality");
         this.frames = animation.frames();
         this.totalPlays = animation.totalPlays();
         this.totalWidth = frames.get(0).getWidth();
@@ -44,7 +50,7 @@ public final class AnimatedTexture {
                 throw new IllegalArgumentException("AnimatedTexture frames must have identical dimensions: " + sourceId);
             }
             try {
-                durationMs = Math.addExact(durationMs, frame.getDurationMs());
+                durationMs = Math.addExact(durationMs, effectiveDurationMs(frame));
             } catch (ArithmeticException exception) {
                 throw new IllegalArgumentException("AnimatedTexture cycle duration is too large: " + sourceId, exception);
             }
@@ -96,8 +102,8 @@ public final class AnimatedTexture {
                 }
             }
         }
-        while (elapsedInFrameMs >= frames.get(currentFrameIndex).getDurationMs()) {
-            elapsedInFrameMs -= frames.get(currentFrameIndex).getDurationMs();
+        while (elapsedInFrameMs >= effectiveDurationMs(frames.get(currentFrameIndex))) {
+            elapsedInFrameMs -= effectiveDurationMs(frames.get(currentFrameIndex));
             if (currentFrameIndex == frames.size() - 1) {
                 if (totalPlays != DecodedAnimation.INFINITE_PLAYS && completedPlays + 1 >= totalPlays) {
                     completedPlays = totalPlays;
@@ -120,7 +126,7 @@ public final class AnimatedTexture {
         if (totalPlays == DecodedAnimation.INFINITE_PLAYS) {
             return false;
         }
-        long durationMs = frames.get(0).getDurationMs();
+        long durationMs = effectiveDurationMs(frames.get(0));
         long playsElapsed = elapsedMs / durationMs;
         long remainder = elapsedMs % durationMs;
         long combinedRemainder = elapsedInFrameMs + remainder;
@@ -141,15 +147,29 @@ public final class AnimatedTexture {
     }
 
     public NativeImage getCurrentFrameResized(int targetWidth, int targetHeight) {
+        return getCurrentFrameResized(targetWidth, targetHeight, AnimatedTexturesConfig.get().scalingMode);
+    }
+
+    public NativeImage getCurrentFrameResized(int targetWidth, int targetHeight,
+                                              AnimatedTexturesConfig.ScalingMode scalingMode) {
         if (targetWidth <= 0 || targetHeight <= 0) {
             throw new IllegalArgumentException("Target dimensions must be positive");
         }
+        NativeImage image = new NativeImage(NativeImage.Format.RGBA, targetWidth, targetHeight, false);
+        renderCurrentFrame(image, scalingMode);
+        return image;
+    }
+
+    public void renderCurrentFrame(NativeImage image, AnimatedTexturesConfig.ScalingMode scalingMode) {
+        Objects.requireNonNull(image, "image");
+        Objects.requireNonNull(scalingMode, "scalingMode");
         AnimatedFrame frame = frames.get(currentFrameIndex);
-        if (AnimatedTexturesConfig.get().shouldUseBilinear()
-                && targetWidth >= frame.getWidth() && targetHeight >= frame.getHeight()) {
-            return renderBilinear(frame, targetWidth, targetHeight);
+        if (scalingMode == AnimatedTexturesConfig.ScalingMode.BILINEAR
+                && image.getWidth() >= frame.getWidth() && image.getHeight() >= frame.getHeight()) {
+            renderBilinear(frame, image);
+        } else {
+            renderNearest(frame, image);
         }
-        return renderNearest(frame, targetWidth, targetHeight);
     }
 
     public Identifier getSourceId() {
@@ -200,6 +220,10 @@ public final class AnimatedTexture {
         return totalPlays;
     }
 
+    public AnimationQuality getQuality() {
+        return quality;
+    }
+
     public int getTotalWidth() {
         return totalWidth;
     }
@@ -224,8 +248,13 @@ public final class AnimatedTexture {
         return Identifier.of(sourceId.getNamespace(), withoutPrefix);
     }
 
-    private NativeImage renderNearest(AnimatedFrame frame, int targetWidth, int targetHeight) {
-        NativeImage image = new NativeImage(NativeImage.Format.RGBA, targetWidth, targetHeight, false);
+    private int effectiveDurationMs(AnimatedFrame frame) {
+        return Math.max(frame.getDurationMs(), quality.minimumFrameDurationMs());
+    }
+
+    private void renderNearest(AnimatedFrame frame, NativeImage image) {
+        int targetWidth = image.getWidth();
+        int targetHeight = image.getHeight();
         int[] pixels = frame.pixelsUnsafe();
         for (int y = 0; y < targetHeight; y++) {
             int sourceY = (int) ((long) y * frame.getHeight() / targetHeight);
@@ -234,33 +263,43 @@ public final class AnimatedTexture {
                 image.setColor(x, y, argbToAbgr(pixels[sourceY * frame.getWidth() + sourceX]));
             }
         }
-        return image;
     }
 
-    private NativeImage renderBilinear(AnimatedFrame frame, int targetWidth, int targetHeight) {
-        NativeImage image = new NativeImage(NativeImage.Format.RGBA, targetWidth, targetHeight, false);
-        int[] pixels = resizeBilinearArgb(frame.pixelsUnsafe(), frame.getWidth(), frame.getHeight(),
-                targetWidth, targetHeight);
+    private void renderBilinear(AnimatedFrame frame, NativeImage image) {
+        int targetWidth = image.getWidth();
+        int targetHeight = image.getHeight();
+        int[] pixels = frame.pixelsUnsafe();
+        int sourceWidth = frame.getWidth();
+        int sourceHeight = frame.getHeight();
         for (int y = 0; y < targetHeight; y++) {
+            float sourceY = sourceCoordinate(y, sourceHeight, targetHeight);
+            int y0 = (int) Math.floor(sourceY);
+            int y1 = Math.min(y0 + 1, sourceHeight - 1);
+            float yFraction = sourceY - y0;
             for (int x = 0; x < targetWidth; x++) {
-                image.setColor(x, y, argbToAbgr(pixels[y * targetWidth + x]));
+                float sourceX = sourceCoordinate(x, sourceWidth, targetWidth);
+                int x0 = (int) Math.floor(sourceX);
+                int x1 = Math.min(x0 + 1, sourceWidth - 1);
+                float xFraction = sourceX - x0;
+                int argb = interpolateArgb(
+                        pixels[y0 * sourceWidth + x0], pixels[y0 * sourceWidth + x1],
+                        pixels[y1 * sourceWidth + x0], pixels[y1 * sourceWidth + x1],
+                        xFraction, yFraction);
+                image.setColor(x, y, argbToAbgr(argb));
             }
         }
-        return image;
     }
 
     static int[] resizeBilinearArgb(int[] pixels, int sourceWidth, int sourceHeight,
                                     int targetWidth, int targetHeight) {
         int[] resized = new int[targetWidth * targetHeight];
         for (int y = 0; y < targetHeight; y++) {
-            float sourceY = ((y + 0.5f) * sourceHeight / targetHeight) - 0.5f;
-            sourceY = Math.max(0, Math.min(sourceY, sourceHeight - 1));
+            float sourceY = sourceCoordinate(y, sourceHeight, targetHeight);
             int y0 = (int) Math.floor(sourceY);
             int y1 = Math.min(y0 + 1, sourceHeight - 1);
             float yFraction = sourceY - y0;
             for (int x = 0; x < targetWidth; x++) {
-                float sourceX = ((x + 0.5f) * sourceWidth / targetWidth) - 0.5f;
-                sourceX = Math.max(0, Math.min(sourceX, sourceWidth - 1));
+                float sourceX = sourceCoordinate(x, sourceWidth, targetWidth);
                 int x0 = (int) Math.floor(sourceX);
                 int x1 = Math.min(x0 + 1, sourceWidth - 1);
                 float xFraction = sourceX - x0;
@@ -279,24 +318,27 @@ public final class AnimatedTexture {
         float topRightWeight = xFraction * (1 - yFraction);
         float bottomLeftWeight = (1 - xFraction) * yFraction;
         float bottomRightWeight = xFraction * yFraction;
-        int[] samples = {topLeft, topRight, bottomLeft, bottomRight};
-        float[] weights = {topWeight, topRightWeight, bottomLeftWeight, bottomRightWeight};
-        float alpha = 0;
-        float red = 0;
-        float green = 0;
-        float blue = 0;
-        for (int index = 0; index < samples.length; index++) {
-            int sampleAlpha = samples[index] >>> 24;
-            float weightedAlpha = sampleAlpha * weights[index];
-            alpha += weightedAlpha;
-            red += ((samples[index] >>> 16) & 0xFF) * weightedAlpha;
-            green += ((samples[index] >>> 8) & 0xFF) * weightedAlpha;
-            blue += (samples[index] & 0xFF) * weightedAlpha;
-        }
+        float topLeftAlpha = (topLeft >>> 24) * topWeight;
+        float topRightAlpha = (topRight >>> 24) * topRightWeight;
+        float bottomLeftAlpha = (bottomLeft >>> 24) * bottomLeftWeight;
+        float bottomRightAlpha = (bottomRight >>> 24) * bottomRightWeight;
+        float alpha = topLeftAlpha + topRightAlpha + bottomLeftAlpha + bottomRightAlpha;
         int outputAlpha = Math.round(alpha);
         if (outputAlpha == 0 || alpha == 0) {
             return 0;
         }
+        float red = ((topLeft >>> 16) & 0xFF) * topLeftAlpha
+                + ((topRight >>> 16) & 0xFF) * topRightAlpha
+                + ((bottomLeft >>> 16) & 0xFF) * bottomLeftAlpha
+                + ((bottomRight >>> 16) & 0xFF) * bottomRightAlpha;
+        float green = ((topLeft >>> 8) & 0xFF) * topLeftAlpha
+                + ((topRight >>> 8) & 0xFF) * topRightAlpha
+                + ((bottomLeft >>> 8) & 0xFF) * bottomLeftAlpha
+                + ((bottomRight >>> 8) & 0xFF) * bottomRightAlpha;
+        float blue = (topLeft & 0xFF) * topLeftAlpha
+                + (topRight & 0xFF) * topRightAlpha
+                + (bottomLeft & 0xFF) * bottomLeftAlpha
+                + (bottomRight & 0xFF) * bottomRightAlpha;
         int outputRed = clampChannel(Math.round(red / alpha));
         int outputGreen = clampChannel(Math.round(green / alpha));
         int outputBlue = clampChannel(Math.round(blue / alpha));
@@ -305,6 +347,11 @@ public final class AnimatedTexture {
 
     private static int clampChannel(int value) {
         return Math.max(0, Math.min(255, value));
+    }
+
+    private static float sourceCoordinate(int targetCoordinate, int sourceSize, int targetSize) {
+        float source = ((targetCoordinate + 0.5f) * sourceSize / targetSize) - 0.5f;
+        return Math.max(0, Math.min(source, sourceSize - 1));
     }
 
     private static int argbToAbgr(int argb) {

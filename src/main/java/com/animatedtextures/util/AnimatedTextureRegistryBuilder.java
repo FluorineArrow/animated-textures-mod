@@ -11,15 +11,25 @@ import java.util.Map;
 public final class AnimatedTextureRegistryBuilder {
 
     private final AnimatedTextureReloadBudget budget;
+    private final AnimationQuality quality;
     private final Map<Identifier, AnimatedTexture> textures = new LinkedHashMap<>();
     private boolean frozen;
 
     public AnimatedTextureRegistryBuilder() {
-        this(new AnimatedTextureReloadBudget());
+        this(AnimationQuality.STANDARD);
+    }
+
+    public AnimatedTextureRegistryBuilder(AnimationQuality quality) {
+        this(quality.newReloadBudget(), quality);
     }
 
     AnimatedTextureRegistryBuilder(AnimatedTextureReloadBudget budget) {
+        this(budget, AnimationQuality.STANDARD);
+    }
+
+    private AnimatedTextureRegistryBuilder(AnimatedTextureReloadBudget budget, AnimationQuality quality) {
         this.budget = budget;
+        this.quality = quality;
     }
 
     public AnimatedTextureReloadBudget.Remaining remaining() {
@@ -45,7 +55,7 @@ public final class AnimatedTextureRegistryBuilder {
         checkMutable();
         frozen = true;
         return new AnimatedTextureRegistrySnapshot(textures, budget.frames(),
-                budget.retainedPixels(), budget.estimatedBytes());
+                budget.retainedPixels(), budget.estimatedBytes(), quality);
     }
 
     private void checkMutable() {

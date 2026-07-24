@@ -12,6 +12,43 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 class GifDecoderTest {
 
     @Test
+    void transparentLogicalScreenPixelsUseTheGifBackgroundColor() throws Exception {
+        byte[] gif = {
+                'G', 'I', 'F', '8', '9', 'a',
+                2, 0, 1, 0, (byte) 0x81, 2, 0,
+                (byte) 0xFF, 0, 0, 0, 0, (byte) 0xFF, (byte) 0xFF, (byte) 0xFF, (byte) 0xFF, 0, (byte) 0xFF, 0,
+                0x21, (byte) 0xF9, 4, 1, 1, 0, 2, 0,
+                0x2C, 0, 0, 0, 0, 2, 0, 1, 0, 0,
+                2, 2, 0x14, 0x0A, 0,
+                0x3B
+        };
+
+        var frames = new GifDecoder().decode(new ByteArrayInputStream(gif));
+
+        assertArrayEquals(new int[]{0xFFFFFFFF, 0xFFFF0000}, frames.get(0).getPixels());
+    }
+
+    @Test
+    void disposalToBackgroundClearsOnlyThePreviousFrameRectangle() throws Exception {
+        byte[] gif = {
+                'G', 'I', 'F', '8', '9', 'a',
+                2, 0, 1, 0, (byte) 0x80, 1, 0,
+                (byte) 0xFF, 0, 0, 0, 0, (byte) 0xFF,
+                0x21, (byte) 0xF9, 4, 8, 1, 0, 0, 0,
+                0x2C, 0, 0, 0, 0, 1, 0, 1, 0, 0,
+                2, 2, 0x44, 0x01, 0,
+                0x2C, 1, 0, 0, 0, 1, 0, 1, 0, 0,
+                2, 2, 0x4C, 0x01, 0,
+                0x3B
+        };
+
+        var frames = new GifDecoder().decode(new ByteArrayInputStream(gif));
+
+        assertArrayEquals(new int[]{0xFFFF0000, 0xFF0000FF}, frames.get(0).getPixels());
+        assertArrayEquals(new int[]{0xFF0000FF, 0xFF0000FF}, frames.get(1).getPixels());
+    }
+
+    @Test
     void transparentPixelsPreserveTheCompositedCanvas() throws Exception {
         byte[] gif = {
                 'G', 'I', 'F', '8', '9', 'a',

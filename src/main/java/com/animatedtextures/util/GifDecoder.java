@@ -48,6 +48,10 @@ public class GifDecoder {
         this(AnimatedImageLimits.DEFAULT.forRemaining(remaining));
     }
 
+    public GifDecoder(AnimationQuality quality, AnimatedTextureReloadBudget.Remaining remaining) {
+        this(quality.imageLimits().forRemaining(remaining));
+    }
+
     public GifDecoder() {
         this(AnimatedImageLimits.DEFAULT);
     }
@@ -111,8 +115,6 @@ public class GifDecoder {
                 throw new IOException("GIF logical-screen background index is outside the global color table");
             }
             backgroundColor = globalColorTable[backgroundIndex];
-        } else {
-            backgroundColor = 0;
         }
         currentColorTable = globalColorTable;
         image = new int[pixelCount];
@@ -211,7 +213,7 @@ public class GifDecoder {
         decodeImageData();
 
         int durationMs = delayCentiseconds == 0 ? 100 : delayCentiseconds * 10;
-        frames.add(new AnimatedFrame(image, width, height, durationMs));
+        frames.add(new AnimatedFrame(image, width, height, durationMs, limits));
         retainedPixels += canvasPixels;
 
         if (dispose == 2) {

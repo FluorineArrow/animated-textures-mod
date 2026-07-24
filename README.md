@@ -40,7 +40,7 @@
 |------|----------|---------------------|
 | **GIF 支持** | 支持标准 GIF89a 格式动画，含多帧、透明度、帧间延迟 | Full GIF89a support with multi-frame, transparency, inter-frame delay |
 | **APNG 支持** | 支持 `.png3` 扩展名的 APNG（动画 PNG）格式 | APNG (Animated PNG) via `.png3` extension |
-| **Bounded resolution** | 支持 16×16、32×32、64×64 等纹理，单边最多 2,048 像素 | Supports textures up to 2,048 pixels per side |
+| **可调画质** | 标准、高帧率、高分辨率和高质量四档，最高 60 FPS / 4K | Standard, high-FPS, high-resolution, and high-quality modes up to 60 FPS / 4K |
 | **多图集支持** | 方块、物品、药水效果图标均可使用动画纹理 | Works with block, item, and mob effect atlases |
 | **双线性缩放** | 可选双线性插值上采样，高分辨率资源包更平滑 | Optional bilinear upscaling for smooth high-res textures |
 | **Sodium 兼容** | 兼容 Sodium 渲染优化模组 | Compatible with Sodium rendering optimization mod |
@@ -72,7 +72,7 @@
      ▼           ▼
 ┌──────────┐ ┌──────────────────────┐
 │ Mixin    │ │ AnimatedTexture      │  ← 每个动画纹理的帧管理器
-│ (钩子)   │ │ TickManager          │  ← 每 Tick 推进帧并上传 GPU
+│ (钩子)   │ │ TickManager          │  ← 按质量档推进帧并上传 GPU
 └──────────┘ └──────────────────────┘
 ```
 
@@ -90,7 +90,7 @@ Step 3: select one animation before decoding
 
 Animations without a visible same-name PNG fallback are ignored. Resource filters are honored. The highest-priority visible pack wins; if one winning pack supplies both formats, `.png3` APNG takes precedence over `.gif`. A corrupt selected animation falls back to its static PNG rather than loading a lower-priority animation.
 
-Decoder limits are enforced before pixel buffers are allocated: 16 MiB encoded input, 2,048 pixels per side, 4,194,304 pixels per frame/canvas, 256 frames, and 16,777,216 retained decoded pixels per animation.
+Decoder limits are enforced before pixel buffers are allocated. Standard and high-frame-rate modes allow 16 MiB encoded input, 2,048 pixels per side, 4,194,304 pixels per frame/canvas, 256 frames, and 16,777,216 retained decoded pixels per animation. High-resolution and high-quality modes allow 32 MiB input, 4,096 pixels per side, 16,777,216 pixels per frame/canvas, and 33,554,432 retained pixels.
 
 #### 2. GIF 解码 / GIF Decoding (`GifDecoder`)
 
@@ -127,15 +127,15 @@ APNG 文件 → 验证 PNG 签名 → 解析 IHDR/acTL/fcTL/fdAT 块
 
 #### 4. Atlas Animation Uploads
 
-`SpriteAtlasTextureMixin` captures each atlas stitch result, including the stitched sprite map and mip level. The tick manager binds every matched sprite to its actual atlas and uploads an initial frame, then uploads again only when that animation frame changes.
+`SpriteAtlasTextureMixin` captures each atlas stitch result, including the stitched sprite map and mip level. The animation manager binds every matched sprite to its actual atlas and uploads an initial frame, then uploads again only when the visible frame changes. Standard modes run at client-tick cadence; high-frame-rate modes use the render loop with GPU updates capped at 60 Hz.
 
-Every generated frame refreshes all atlas mip levels. This avoids distant textures sampling stale static PNG pixels. GUI sprites under `textures/gui/sprites/...` and mob-effect textures use their atlas-specific bare-ID aliases; standard texture-relative IDs work in other stitched vanilla atlases.
+Every generated frame refreshes all atlas mip levels. Prepared frames and mip chains are cached within a bounded per-reload budget when a complete animation fits; oversized animations reuse their base buffer. This avoids repeated scaling allocations while keeping native memory bounded.
 
 #### 5. Frame Scaling
 
-动画纹理会缩放到精灵在图集中的分配区域。单个解码帧的宽高最多为 2,048 像素。
+动画纹理会缩放到精灵在图集中的分配区域。标准档单边最多 2,048 像素，高分辨率档单边最多 4,096 像素。
 
-Animated textures are scaled to the sprite's allocated atlas region. Decoded frames are limited to 2,048 pixels on either side.
+Animated textures are scaled to the sprite's allocated atlas region. Standard modes allow up to 2,048 pixels per side; high-resolution modes allow up to 4,096 pixels. The same-name static PNG must use the intended display size because it determines the stitched sprite region.
 
 | 模式 | 算法 | 适用场景 |
 |------|------|----------|
@@ -156,14 +156,16 @@ Animated textures are scaled to the sprite's allocated atlas region. Decoded fra
 src/main/java/com/animatedtextures/
 ├── client/
 │   ├── AnimatedTexturesClient.java         # Client entry point and tick registration
-│   ├── AnimatedTexturesConfig.java         # Scaling-mode JSON configuration
+│   ├── AnimatedTexturesConfig.java         # Scaling and quality JSON configuration
 │   ├── AnimatedTexturesModMenu.java        # ModMenu configuration screen
 │   ├── AnimatedTextureReloadListener.java  # Visible-resource discovery and decoding
 │   └── AnimatedResourceResolver.java       # Pack-priority and format selection
 ├── mixin/
+│   ├── GameRendererMixin.java                # High-frame-rate render callback
 │   ├── ReloadableResourceManagerMixin.java   # Owns overall reload attempts
 │   └── SpriteAtlasTextureMixin.java          # Captures stitched atlas regions
 └── util/
+    ├── AnimationQuality.java               # Four bounded quality policies
     ├── AnimatedImageLimits.java            # Decoder input/frame safety limits
     ├── AnimatedTexture.java                # Frame timing, scaling, and sprite IDs
     ├── AnimatedTextureRegistry.java        # Canonical selected animations
@@ -241,7 +243,7 @@ my_animated_pack/
 
 ### GIF 制作要点 / GIF Tips
 
-- 帧延迟最小 50ms（模组强制执行，即最高 20 FPS）
+- 标准档的帧延迟最小 50ms；高帧率和高质量档保留源时间轴并以最高 60 Hz 上传
 - 支持循环动画（NETSCAPE2.0 扩展）
 - 支持透明度和帧间处置模式
 - 建议使用 16×16 或与目标精灵相同的分辨率
@@ -266,17 +268,28 @@ Mob effect icons use a separate atlas at **18×18** pixels. The mod handles the 
 
 配置文件位于 `.minecraft/config/animated_textures.json`，也可通过 ModMenu 在游戏内修改。
 
-Config file: `.minecraft/config/animated_textures.json`. ModMenu edits a draft and writes it only through **Save & Done**. A `null`, malformed, or missing scaling value falls back to `BILINEAR`; legacy keys are ignored.
+Config file: `.minecraft/config/animated_textures.json`. ModMenu edits a draft and writes it only through **Save & Done**. Invalid or missing values fall back to `BILINEAR` and `STANDARD`; legacy keys are ignored. Changing quality performs a resource reload so decoder limits, timing, atlas bindings, and native caches switch atomically.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `scalingMode` | Enum | `BILINEAR` | `NEAREST` for pixel-preserving sampling or `BILINEAR` for smooth upscaling |
+| `quality` | Enum | `STANDARD` | `STANDARD`, `HIGH_FRAME_RATE`, `HIGH_RESOLUTION`, or `HIGH_QUALITY` |
+
+| Quality | GPU update rate | Maximum side | Reload-wide decoded pixels |
+|---------|-----------------|--------------|----------------------------|
+| `STANDARD` | ~20 Hz | 2,048 px | 16,777,216 (~64 MiB ARGB) |
+| `HIGH_FRAME_RATE` | Up to 60 Hz | 2,048 px | 16,777,216 (~64 MiB ARGB) |
+| `HIGH_RESOLUTION` | ~20 Hz | 4,096 px | 33,554,432 (~128 MiB ARGB) |
+| `HIGH_QUALITY` | Up to 60 Hz | 4,096 px | 33,554,432 (~128 MiB ARGB) |
+
+High-resolution animations can consume substantial atlas space and GPU upload bandwidth. Source frames shorter than 16.67 ms keep their original timeline in high-frame-rate modes but may be skipped when sampled at the 60 Hz upload cap.
 
 All atlas mip levels are updated automatically whenever an animation frame changes.
 
 ```json
 {
-  "scalingMode": "BILINEAR"
+  "scalingMode": "BILINEAR",
+  "quality": "STANDARD"
 }
 ```
 
@@ -347,9 +360,9 @@ A: Minecraft's texture atlas system only recognizes `.png` files. The `.png` reg
 **Q: 动画帧率最高多少？**
 **Q: What's the maximum animation frame rate?**
 
-A: 模组强制最低帧持续时间为 50ms，即最高约 20 FPS。这是为了避免过快的动画消耗过多 GPU 带宽。
+A: 标准和高分辨率档最高约 20 FPS；高帧率和高质量档按渲染循环采样，GPU 更新最高 60 FPS。
 
-A: The mod enforces a minimum frame duration of 50ms (~20 FPS max). This prevents overly fast animations from consuming excessive GPU bandwidth.
+A: Standard and high-resolution modes run at about 20 FPS. High-frame-rate and high-quality modes preserve source timing and update the GPU at up to 60 FPS.
 
 ---
 

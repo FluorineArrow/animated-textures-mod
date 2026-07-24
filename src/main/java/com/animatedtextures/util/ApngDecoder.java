@@ -41,6 +41,10 @@ public class ApngDecoder {
         this(AnimatedImageLimits.DEFAULT.forRemaining(remaining));
     }
 
+    public ApngDecoder(AnimationQuality quality, AnimatedTextureReloadBudget.Remaining remaining) {
+        this(quality.imageLimits().forRemaining(remaining));
+    }
+
     public ApngDecoder() {
         this(AnimatedImageLimits.DEFAULT);
     }
@@ -281,7 +285,7 @@ public class ApngDecoder {
             graphics.drawImage(image, control.xOffset, control.yOffset, null);
             graphics.dispose();
 
-            result.add(new AnimatedFrame(canvas, durationMs(control)));
+            result.add(new AnimatedFrame(canvas, durationMs(control), limits));
             retainedPixels += (long) canvasWidth * canvasHeight;
 
             if (control.disposeOp == 1) {

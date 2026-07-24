@@ -1,7 +1,7 @@
 package com.animatedtextures.client;
 
-import com.animatedtextures.client.AnimatedTexturesConfig.ScalingMode;
 import com.animatedtextures.util.AnimatedTextureRegistry;
+import com.animatedtextures.util.AnimatedTextureTickManager;
 import com.terraformersmc.modmenu.api.ConfigScreenFactory;
 import com.terraformersmc.modmenu.api.ModMenuApi;
 import net.minecraft.client.MinecraftClient;
@@ -50,10 +50,23 @@ public final class AnimatedTexturesModMenu implements ModMenuApi {
                 button.setMessage(Text.literal("Scaling: " + draft.scalingMode.getDisplayName()));
             }).dimensions(centerX - buttonWidth / 2, startY + 52, buttonWidth, buttonHeight).build());
 
+            addDrawableChild(ButtonWidget.builder(Text.literal("Quality: " + draft.quality.getDisplayName()), button -> {
+                draft.quality = draft.quality.next();
+                button.setMessage(Text.literal("Quality: " + draft.quality.getDisplayName()));
+            }).dimensions(centerX - buttonWidth / 2, startY + 76, buttonWidth, buttonHeight).build());
+
             addDrawableChild(ButtonWidget.builder(Text.literal("Save & Done"), button -> {
+                AnimatedTexturesConfig previous = AnimatedTexturesConfig.get();
+                boolean qualityChanged = previous.quality != draft.quality;
+                boolean scalingChanged = previous.scalingMode != draft.scalingMode;
                 AnimatedTexturesConfig.replaceAndSave(draft);
+                if (qualityChanged) {
+                    MinecraftClient.getInstance().reloadResources();
+                } else if (scalingChanged) {
+                    AnimatedTextureTickManager.invalidatePreparedFrames();
+                }
                 close();
-            }).dimensions(centerX - 50, startY + 92, 100, buttonHeight).build());
+            }).dimensions(centerX - 50, startY + 116, 100, buttonHeight).build());
         }
 
         @Override
@@ -66,11 +79,14 @@ public final class AnimatedTexturesModMenu implements ModMenuApi {
             context.drawCenteredTextWithShadow(textRenderer,
                     Text.literal("Place paired .gif or .png3 files in your resource pack."),
                     centerX, startY - 30, 0xAAAAAA);
-            String scalingDescription = draft.scalingMode == ScalingMode.BILINEAR
-                    ? "Smooth upscaling for high-resolution textures"
-                    : "Fast pixel-perfect scaling";
-            context.drawCenteredTextWithShadow(textRenderer, Text.literal(scalingDescription),
-                    centerX, startY + 78, 0x888888);
+            String qualityDescription = switch (draft.quality) {
+                case STANDARD -> "20 FPS, textures up to 2048 px";
+                case HIGH_FRAME_RATE -> "Up to 60 FPS, textures up to 2048 px";
+                case HIGH_RESOLUTION -> "20 FPS, textures up to 4096 px";
+                case HIGH_QUALITY -> "Up to 60 FPS, textures up to 4096 px";
+            };
+            context.drawCenteredTextWithShadow(textRenderer, Text.literal(qualityDescription),
+                    centerX, startY + 102, 0x888888);
         }
 
         @Override

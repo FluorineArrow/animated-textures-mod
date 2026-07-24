@@ -3,6 +3,7 @@
   "package": "com.animatedtextures.mixin",
   "compatibilityLevel": "JAVA_21",
   "client": [
+    "GameRendererMixin",
     "ReloadableResourceManagerMixin",
     "SpriteAtlasTextureMixin"
   ],

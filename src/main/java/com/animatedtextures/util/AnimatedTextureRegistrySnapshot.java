@@ -13,13 +13,21 @@ public record AnimatedTextureRegistrySnapshot(
         Map<Identifier, AnimatedTexture> textures,
         int frameCount,
         long retainedPixels,
-        long estimatedBytes
+        long estimatedBytes,
+        AnimationQuality quality
 ) {
     static final AnimatedTextureRegistrySnapshot EMPTY =
-            new AnimatedTextureRegistrySnapshot(Map.of(), 0, 0, 0);
+            new AnimatedTextureRegistrySnapshot(Map.of(), 0, 0, 0, AnimationQuality.STANDARD);
+    private static final Collection<AnimatedTexture> EMPTY_TEXTURES = List.of();
+
+    public AnimatedTextureRegistrySnapshot(Map<Identifier, AnimatedTexture> textures, int frameCount,
+                                           long retainedPixels, long estimatedBytes) {
+        this(textures, frameCount, retainedPixels, estimatedBytes, AnimationQuality.STANDARD);
+    }
 
     public AnimatedTextureRegistrySnapshot {
         textures = Map.copyOf(textures);
+        quality = java.util.Objects.requireNonNull(quality, "quality");
     }
 
     public AnimatedTexture get(Identifier targetId) {
@@ -31,7 +39,7 @@ public record AnimatedTextureRegistrySnapshot(
     }
 
     public Collection<AnimatedTexture> all() {
-        return List.copyOf(textures.values());
+        return textures.isEmpty() ? EMPTY_TEXTURES : textures.values();
     }
 
     public int size() {
